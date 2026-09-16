@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>DASH V0 融合 Viewer</title>
+<style>
+  body{margin:0;background:#111;font-family:system-ui;color:#eee;overflow:hidden}
+  #c{display:block}
+  #hud{position:fixed;top:10px;left:10px;background:rgba(0,0,0,.6);padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.6;z-index:9}
+  .ok{color:#4f4} .no{color:#f66}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">连接中…</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"/viewer/vendor/three.module.js",
+  "three/addons/":"/viewer/vendor/jsm/",
+  "@pixiv/three-vrm":"/viewer/vendor/three-vrm.module.js"
+}}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin } from "@pixiv/three-vrm";
+
+const HUD = document.getElementById("hud");
+const setHud = (s) => HUD.innerHTML = s;
+
+const renderer = new THREE.WebGLRenderer({canvas:document.getElementById("c"),antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const scene = new THREE.Scene();
+scene.add(new THREE.HemisphereLight(0xffffff,0x888888,1.8));
+const dl = new THREE.DirectionalLight(0xffffff,1.4); dl.position.set(2,3,3); scene.add(dl);
+const camera = new THREE.PerspectiveCamera(30, innerWidth/innerHeight, 0.1, 20);
+camera.position.set(0,1.2,1.8); camera.lookAt(0,1.0,0);
+scene.add(new THREE.GridHelper(5,10,0x444444,0x222222));
+
+let vrm = null;
+
+const BONES = {
+  Hips:"hips", Spine:"spine", Chest:"chest", Neck:"neck", Head:"head",
+  LeftUpperArm:"leftUpperArm", LeftLowerArm:"leftLowerArm", LeftHand:"leftHand",
+  RightUpperArm:"rightUpperArm", RightLowerArm:"rightLowerArm", RightHand:"rightHand",
+  LeftUpperLeg:"leftUpperLeg", LeftLowerLeg:"leftLowerLeg",
+  RightUpperLeg:"rightUpperLeg", RightLowerLeg:"rightLowerLeg",
+};
+const FINGERS = ["Thumb","Index","Middle","Ring","Little"];
+function handMap(side){
+  const m = {[side+"Wrist"]: side.toLowerCase()==="left"?"leftHand":"rightHand"};
+  for (const f of FINGERS)
+    for (const s of ["Proximal","Intermediate","Distal"])
+      m[side+f+s] = (side.toLowerCase()==="left"?"left":"right")+f+s;
+  return m;
+}
+const LH = handMap("Left"), RH = handMap("Right");
+
+function setBone(node, rot, scale=1){
+  if(!node) return;
+  node.rotation.set(rot.x*scale, rot.y*scale, rot.z*scale);
+  node.quaternion.setFromEuler(node.rotation);
+}
+
+function bs(name,list){ const f=list.find(c=>c.categoryName===name); return f?f.score:0; }
+function applyFace(blendshapes){
+  if(!vrm||!blendshapes) return;
+  const E = vrm.expressionManager;
+  if(!E) return;
+  const blink = Math.max(bs("eyeBlinkLeft",blendshapes), bs("eyeBlinkRight",blendshapes));
+  const jaw = bs("jawOpen",blendshapes);
+  const smile = Math.max(bs("mouthSmileLeft",blendshapes), bs("mouthSmileRight",blendshapes));
+  const frown = Math.max(bs("mouthFrownLeft",blendshapes), bs("mouthFrownRight",blendshapes));
+  const browDown = Math.max(bs("browDownLeft",blendshapes), bs("browDownRight",blendshapes));
+  const browUp = Math.max(bs("browInnerUp",blendshapes), bs("browOuterUpLeft",blendshapes));
+  try {
+    E.setValue("blink", Math.min(1,blink));
+    E.setValue("aa", Math.min(1,jaw));
+    E.setValue("joy", Math.min(1,smile));
+    E.setValue("sorrow", Math.min(1,frown));
+    E.setValue("angry", Math.min(1,browDown));
+    E.setValue("surprise", Math.min(1,browUp*0.6+jaw*0.4));
+    E.setValue("lookUp", Math.min(1,bs("eyeLookUpLeft",blendshapes)));
+    E.setValue("lookDown", Math.min(1,bs("eyeLookDownLeft",blendshapes)));
+    E.setValue("lookLeft", Math.min(1,bs("eyeLookOutLeft",blendshapes)));
+    E.setValue("lookRight", Math.min(1,bs("eyeLookOutRight",blendshapes)));
+  } catch(e){}
+}
+
+function clamp(v){return Math.max(0,Math.min(1,v));}
+function applyRiggedFace(rf){
+  if(!vrm) return;
+  const E = vrm.expressionManager; if(!E) return;
+  try {
+    const bl = clamp(1-(rf.eye?.l??0)), br = clamp(1-(rf.eye?.r??0));
+    E.setValue("blinkLeft", bl); E.setValue("blinkRight", br); E.setValue("blink", Math.max(bl,br));
+    const sh = rf.mouth?.shape || {};
+    E.setValue("ih", clamp((sh.I??0)/0.8));
+    E.setValue("aa", clamp((sh.A??0)/0.8));
+    E.setValue("ee", clamp((sh.E??0)/0.8));
+    E.setValue("oh", clamp((sh.O??0)/0.8));
+    E.setValue("ou", clamp((sh.U??0)/0.8));
+    if(rf.pupil && vrm.lookAt) vrm.lookAt.applier.applyYawPitch(rf.pupil.y, rf.pupil.x);
+  } catch(e){}
+}
+
+(async () => {
+  const loader = new GLTFLoader();
+  loader.register(p => new VRMLoaderPlugin(p));
+  const gltf = await loader.loadAsync("/viewer/models/three-vrm-girl.vrm");
+  vrm = gltf.userData.vrm;
+  vrm.scene.rotation.y = Math.PI;
+  scene.add(vrm.scene);
+  setHud('<span class="ok">VRM 已加载</span> · 等待融合数据…');
+})().catch(e=>setHud(`<span class="no">VRM 加载失败: ${e.message}</span>`));
+
+let latest = null;
+let ws = null;
+function connectWS(){
+  ws = new WebSocket("ws://127.0.0.1:8766");
+  ws.onopen = () => setHud('<span class="ok">融合流已连接</span> · 等待数据…');
+  ws.onclose = () => { setHud('<span class="no">融合流断开，3s 后重连…</span>'); setTimeout(connectWS, 3000); };
+  ws.onerror = () => { try{ws.close()}catch(e){} };
+  ws.onmessage = (e) => { try { latest = JSON.parse(e.data); window.__dbg = latest; } catch{} };
+}
+connectWS();
+setInterval(()=>{ window.__wsState = ws ? ws.readyState : 'null'; }, 500);
+
+let lastStats = 0;
+function render(t){
+  requestAnimationFrame(render);
+  if(vrm && latest){
+    const b = latest.body;
+    if(b && b.riggedPose){
+      const P = b.riggedPose;
+      if(P.Hips) vrm.scene.position.set(-P.Hips.position.x, P.Hips.position.y+0.05, -P.Hips.position.z);
+      for(const [k,name] of Object.entries(BONES)) if(P[k]) setBone(vrm.humanoid.getNormalizedBoneNode(name), P[k].rotation || P[k]);
+    }
+    if(b && b.riggedLeftHand) for(const [k,name] of Object.entries(LH)) if(b.riggedLeftHand[k]) setBone(vrm.humanoid.getNormalizedBoneNode(name), b.riggedLeftHand[k]);
+    if(b && b.riggedRightHand) for(const [k,name] of Object.entries(RH)) if(b.riggedRightHand[k]) setBone(vrm.humanoid.getNormalizedBoneNode(name), b.riggedRightHand[k]);
+    if(latest.face){
+      if(latest.face.blendshapes) applyFace(latest.face.blendshapes);
+      else if(latest.face.riggedFace) applyRiggedFace(latest.face.riggedFace);
+    }
+    vrm.update(t/1000);
+    if(t-lastStats>2000){
+      lastStats=t;
+      setHud(`body ${b?'<span class="ok">on</span>':'<span class="no">off</span>'} · faceBS ${latest.face?.blendshapes?.length||0} · syncErr ${latest.syncErrorMs??'n/a'}ms`);
+    }
+  }
+  renderer.render(scene,camera);
+}
+requestAnimationFrame(render);
+addEventListener("resize",()=>{renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();});
+</script>
+</body>
+</html>

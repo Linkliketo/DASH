@@ -1,0 +1,32 @@
+# 模型与数据
+models/
+*.task
+*.tflite
+*.onnx
+data/
+# Python 缓存
+__pycache__/
+*.pyc
+.venv/
+
+# 第三方与构建产物
+node_modules/
+facial-motion-capture/
+Demo_*/
+# 测试截图与视频
+*.png
+*.y4m
+*.mp4
+
+# 第三方与大型产物
+SysMocap/
+SysMocapApp/
+*.7z
+*.zip
+*.rar
+
+# IDE 配置
+.idea/
+
+# 运行日志
+*.log
