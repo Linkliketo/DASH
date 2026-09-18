@@ -10,3 +10,15 @@ so just read the code, them you will know how to use the model from way below:
 1. how to import your data (from images, videos to realtime life-stream of your camera)
 2. then taler the options for the data your inputted
 3. draw the points on the origin picture then save it
+
+### quant
+
+in the file of ./V0FastTest/deploy/quant we focus on quantization about the image or realtime model
+
+#### benchmarking
+
+this part we start the bench and the test of bench, this bench should contain below parts
+1. should fit different model and test to bench
+2. the output contains the most import data that can indicate different scales of the model
+3. accuracy most
+

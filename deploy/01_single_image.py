@@ -19,7 +19,7 @@ IMAGE_PATH = r"D:\DASH\V0FastTest\deploy\assets\test_single.jpg"
 # test the existence of path
 print(os.path.exists(MODEL_PATH), os.path.exists(IMAGE_PATH))
 
-# download the model and test if is fine to use
+# set options for landmarker (chose hyperparameters of the model)
 options = mp.tasks.vision.FaceLandmarkerOptions(
     base_options=mp.tasks.BaseOptions(model_asset_path=MODEL_PATH),
     running_mode=mp.tasks.vision.RunningMode.IMAGE,
