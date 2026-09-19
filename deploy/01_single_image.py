@@ -1,8 +1,8 @@
-# this program is to introduce the usage of a series of model by understanding a portrait
+# this program is to introduce the usage of a series of models by understanding a portrait
 # this task I should walk through this path
-#   1. import the mediapipe model for reasoning and cv2 for understanding picture
+#   1. import the mediapipe models for reasoning and cv2 for understanding picture
 #   2. set the path constance
-#   3. set up a 3 instances option (from model options, model running to number of face)
+#   3. set up a 3 instances option (from models options, models running to number of face)
 #   4. process input of image
 #   5. reasoning and print the output
 
@@ -19,7 +19,7 @@ IMAGE_PATH = r"D:\DASH\V0FastTest\deploy\assets\test_single.jpg"
 # test the existence of path
 print(os.path.exists(MODEL_PATH), os.path.exists(IMAGE_PATH))
 
-# set options for landmarker (chose hyperparameters of the model)
+# set options for landmarker (chose hyperparameters of the models)
 options = mp.tasks.vision.FaceLandmarkerOptions(
     base_options=mp.tasks.BaseOptions(model_asset_path=MODEL_PATH),
     running_mode=mp.tasks.vision.RunningMode.IMAGE,

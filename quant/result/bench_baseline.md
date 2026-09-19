@@ -16,4 +16,8 @@
 ### comment
 
 for some reason, the benchmark is just on IMAGE mode which is not the same mode compare to running mode
-however, they can indicate with each other on the efficiency dimension
+however, they can indicate with each other on the efficiency dimension 
+the output can instruct you to choose the video frame rates
+
+Inference at 12 ms corresponds to a theoretical upper limit of ~83 FPS, far above the camera's 30 FPS cap. 
+Therefore, the current bottleneck is on the capture side, and the gains from quantization optimization will only materialize in scenarios with higher resolution or running multiple models simultaneously.

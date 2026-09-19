@@ -5,7 +5,7 @@ import numpy as np
 # run_once can fit different framework from mediapipe to onnx
 def measure_latency(run_once, n_warmup: int = 10, n_runs: int = 100) -> dict:
     """
-    :param run_once: different frameworks of model
+    :param run_once: different frameworks of models
     :param n_warmup: warmup runs
     :param n_runs: times that run to get benchmark scores
     :return: {'mean_ms': float, 'p50_ms': float, 'p95_ms': float, 'min_ms': float}
