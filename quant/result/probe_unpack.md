@@ -24,6 +24,7 @@ file name:face_detector.tflite, size: 229746, compress_size: 229746, compress_ty
 file name:face_landmarks_detector.tflite, size: 2553590, compress_size: 2553590, compress_type: 0, compress_level: None
 file name:geometry_pipeline_metadata_landmarks.binarypb, size: 19376, compress_size: 19376, compress_type: 0, compress_level: None
 file name:face_blendshapes.tflite, size: 955312, compress_size: 955312, compress_type: 0, compress_level: None
+
 unzip log at 2026-09-19 15:28:13.917145 
 unzip the D:\DASH\V0FastTest\models\face_landmarker.task to the D:\DASH\V0FastTest\quant\models\extracted 
 file name:face_detector.tflite, size: 229746, compress_size: 229746, compress_type: 0, compress_level: None
