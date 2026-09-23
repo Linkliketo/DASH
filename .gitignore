@@ -4,6 +4,11 @@ models/
 *.tflite
 *.onnx
 data/
+
+# 参考资料（体积大，本地保留不进版本库）
+# 文献综述里的论文 PDF 共 20 篇 / 约 140 MB，与 models/ 同理：是参考资料不是源码
+*.pdf
+*.docx
 # Python 缓存
 __pycache__/
 *.pyc
