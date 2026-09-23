@@ -362,7 +362,11 @@ D:\DASH\V0FastTest\
 ├── viewer/                      three.js 加 VRM 渲染器
 ├── SysMocap/, SysMocapApp/      身体动捕组件
 ├── facial-motion-capture/       面部捕捉组件
-└── TECHNICAL_ROUTE_REPORT_*.md  本报告
+└── doc/                         文档，含本报告
+    ├── README.md                索引与阅读顺序
+    ├── TECHNICAL_ROUTE_REPORT_EN.md  本报告英文版
+    ├── TECHNICAL_ROUTE_REPORT_CN.md  本报告中文版
+    └── communication.md         协作记录
 ```
 
 实测产物被有意排除在版本控制之外：模型与数据集是产物，不是源码。脚本与证据记录纳入版本控制。

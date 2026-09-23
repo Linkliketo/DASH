@@ -436,7 +436,11 @@ D:\DASH\V0FastTest\
 ├── viewer/                      three.js plus VRM renderer
 ├── SysMocap/, SysMocapApp/      body capture component
 ├── facial-motion-capture/       facial capture component
-└── TECHNICAL_ROUTE_REPORT_*.md  this report
+└── doc/                         documentation, including this report
+    ├── README.md                index and reading order
+    ├── TECHNICAL_ROUTE_REPORT_EN.md  this report
+    ├── TECHNICAL_ROUTE_REPORT_CN.md  Chinese version
+    └── communication.md         collaboration log
 ```
 
 Measured artefacts are deliberately excluded from version control: models and datasets are
