@@ -2,7 +2,6 @@ import faulthandler
 import os
 import sys
 faulthandler.dump_traceback_later(3, repeat=False)
-
 import mediapipe as mp
 import cv2
 
