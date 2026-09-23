@@ -133,7 +133,7 @@ quant/../deploy/dash/
 |---|---|
 | 对象 | `face_detector`（已转 ONNX）+ 候选 B 自训练的网络 |
 | 内容 | 静态/动态量化对比；结构化剪枝（在自训练网络上，因为 `.task` 是锁定包）；延迟-精度曲线 |
-| 产出 | 对比表 + 图表；写入 `技术报告.md` |
+| 产出 | 对比表 + 图表；写入 `doc/report/TECHNICAL_ROUTE_REPORT_CN.md` |
 | 算力 | 本地 CPU |
 | 对应申报书 | S3 的"INT8 量化 + 结构化剪枝 + ONNX Runtime"三项 |
 

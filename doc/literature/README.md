@@ -11,7 +11,7 @@
 ## 目录结构
 
 ```
-literature_review/
+literature/
 ├── README.md                          ← 本文档：调研总览 + PDF 索引
 ├── 01_body_motion_capture/            ← S1 身体动捕
 │   ├── papers.md                      # 单目视频→3D姿态/BVH
