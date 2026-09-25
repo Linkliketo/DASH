@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DASH · 微表情皮套人</title>
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{"imports":{
+  "three": "./vendor/three.module.js",
+  "three/addons/": "./vendor/jsm/",
+  "@pixiv/three-vrm": "./vendor/three-vrm.module.js"
+}}
+</script>
+<script src="vendor/gsap.min.js"></script>
+</head>
+<body>
+<div class="desk">
+
+  <!-- 顶栏：浮动纸卡 -->
+  <header class="paper-card statusbar" id="statusbar">
+    <span class="tape tape-nw"></span><span class="tape tape-ne"></span>
+    <div class="brand">
+      <span class="logo">DASH <em>·</em> 微表情皮套人</span>
+      <span class="version mono">v0.1-SHOWCASE</span>
+    </div>
+    <div class="status">
+      <img src="assets/img/icon-cpu.svg" class="cpu-icon" alt="">
+      <span class="status-text mono" id="status-text">待机</span>
+      <span class="fps mono" id="fps"></span>
+      <button id="stop-btn" class="btn btn-ghost" hidden>停止</button>
+    </div>
+  </header>
+
+  <main class="board">
+
+    <!-- ZONE 01 输入卡 -->
+    <section class="paper-card card-input" id="input-card">
+      <span class="pushpin pin-red"></span>
+      <div class="zone mono">[ ZONE 01 : 输入 ]</div>
+      <h2 class="card-title">把你的表情放上来</h2>
+
+      <div class="source-stage">
+        <!-- landing：拖放区 -->
+        <div class="dropzone" id="dropzone">
+          <img src="assets/img/icon-upload-cloud.svg" class="dz-icon" alt="">
+          <p class="dz-main">把照片或视频拖到这里</p>
+          <p class="dz-or mono">或者</p>
+          <div class="dz-actions">
+            <button class="btn btn-primary" id="btn-camera">用摄像头开始</button>
+            <button class="btn" id="btn-browse">浏览文件</button>
+          </div>
+          <input type="file" id="file-input" accept="image/*,video/*" hidden>
+        </div>
+        <!-- stage：源画面 + 网格叠加 -->
+        <div class="source-view" id="source-view" hidden>
+          <div class="source-box" id="source-box">
+            <img id="source-image" class="source-media" alt="" hidden>
+            <video id="source-video" class="source-media" hidden playsinline></video>
+            <canvas id="mesh-canvas"></canvas>
+            <div class="noface-badge mono" id="noface-badge" hidden>把脸放进画面里</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-foot">
+        <span class="hint" id="input-hint">* 全程本地运行 · 不上传任何图像</span>
+        <button class="btn btn-dark" id="btn-secondary" hidden>换一张</button>
+      </div>
+    </section>
+
+    <!-- ZONE 02 输出卡 -->
+    <section class="paper-card card-output" id="output-card">
+      <span class="pushpin pin-blue"></span>
+      <div class="zone mono zone-blue">[ ZONE 02 : 皮套人 ]</div>
+      <h2 class="card-title title-blue">皮套人预览</h2>
+
+      <div class="render-box">
+        <canvas id="avatar-canvas"></canvas>
+        <div class="render-idle" id="render-idle">
+          <img src="assets/img/icon-axis-3d.svg" alt="">
+          <p class="idle-main">等待开始演示</p>
+          <p class="mono idle-sub">VRM · 52 BLENDSHAPE</p>
+        </div>
+      </div>
+
+      <div class="view-picker mono" id="view-picker">
+        视角
+        <button class="view-btn" data-view="head">仅头部</button>
+        <button class="view-btn active" data-view="half">半身</button>
+        <button class="view-btn" data-view="full">全身</button>
+      </div>
+
+      <div class="card-foot">
+        <label class="picker mono">后端
+          <select id="backend-select" disabled><option>加载中…</option></select>
+        </label>
+        <label class="picker mono">
+          <input type="checkbox" id="mesh-toggle" checked> 网格叠加
+        </label>
+      </div>
+    </section>
+
+    <!-- 底部横条：landing=示例拍立得 / stage=实时读数 -->
+    <aside class="paper-card strip" id="strip">
+      <span class="pushpin pin-yellow"></span>
+      <span class="pushpin pin-green"></span>
+      <div class="strip-head">
+        <h3 id="strip-title">近期示例 · 来自我们的工作室</h3>
+        <span class="mono strip-tag" id="strip-tag">PINBOARD SAMPLES</span>
+      </div>
+      <div class="polaroid-row" id="polaroid-row">
+        <figure class="polaroid"><img src="assets/img/polaroid-clay-vase.png" alt=""><figcaption class="mono">示例 #1</figcaption></figure>
+        <figure class="polaroid"><img src="assets/img/polaroid-retro-camera.png" alt=""><figcaption class="mono">示例 #2</figcaption></figure>
+        <figure class="polaroid"><img src="assets/img/polaroid-bonsai-tree.png" alt=""><figcaption class="mono">示例 #3</figcaption></figure>
+        <figure class="polaroid"><img src="assets/img/polaroid-classic-boot.png" alt=""><figcaption class="mono">示例 #4</figcaption></figure>
+      </div>
+      <div class="readout" id="readout" hidden></div>
+    </aside>
+
+  </main>
+
+  <!-- 左侧固定栏（不随页面滚动） -->
+  <div class="left-rail" id="left-rail">
+    <div class="rail-box">
+      <b class="mono">本地运行 ✦</b>
+      <p>图像不离开这台电脑</p>
+    </div>
+    <div class="rail-box mono">
+      <b>QUICK GUIDE:</b>
+      <p>1. 选一个输入</p>
+      <p>2. 看网格跟随</p>
+      <p>3. 看皮套人模仿</p>
+    </div>
+  </div>
+</div>
+
+<!-- 整页提示 -->
+<div class="overlay" id="overlay" hidden>
+  <div class="paper-card overlay-card">
+    <p id="overlay-text">正在加载…</p>
+    <button class="btn" id="overlay-btn" hidden>重试</button>
+  </div>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

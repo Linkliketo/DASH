@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 from aiohttp import web
 
+from .broadcaster import FaceBroadcaster
 from .contract import array_to_categories
 from .holder import BackendHolder
 from .perception import list_backends
@@ -28,6 +29,8 @@ from .video_io import iter_video_results
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8770
+# 前端目录（showcase/frontend），存在时由本服务直接托管，单进程跑通整个 demo
+DEFAULT_FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 
 _JSON = {"Content-Type": "application/json; charset=utf-8"}
 
@@ -125,6 +128,20 @@ async def _photo(request: web.Request) -> web.Response:
     )
 
 
+async def _ws_face(request: web.Request) -> web.WebSocketResponse:
+    """前端订阅入口：连接后持续收到 miniface-frame 消息（含 landmarks）。"""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    broadcaster: FaceBroadcaster = request.app["broadcaster"]
+    broadcaster.add(ws)
+    try:
+        async for _ in ws:  # 客户端只收不发，读到关闭为止
+            pass
+    finally:
+        broadcaster.discard(ws)
+    return ws
+
+
 def _video_producer(path: Path, holder: BackendHolder, stride: int, loop, queue) -> None:
     """在普通线程里跑，把每帧结果桥接进事件循环的队列。"""
     try:
@@ -191,7 +208,58 @@ async def _video(request: web.Request) -> web.StreamResponse:
     return response
 
 
-def create_app(holder: BackendHolder) -> web.Application:
+class FrameStore:
+    """摄像头最新一帧的 JPEG（采集线程写，MJPEG 处理协程读）。
+
+    赋值在 GIL 下是原子的，demo 规模不需要锁。"""
+
+    def __init__(self) -> None:
+        self._seq = 0
+        self._jpeg: bytes | None = None
+
+    def set(self, jpeg: bytes) -> None:
+        self._seq += 1
+        self._jpeg = jpeg
+
+    def get(self) -> tuple[int, bytes | None]:
+        return self._seq, self._jpeg
+
+
+async def _camera_mjpeg(request: web.Request) -> web.StreamResponse:
+    """MJPEG 直播：前端 <img src="/api/camera/stream"> 直接可用。"""
+    store: FrameStore | None = request.app.get("frame_store")
+    if store is None:
+        return _json({"error": "camera not enabled (serve without --no-camera)"}, status=503)
+    response = web.StreamResponse(
+        headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
+    )
+    await response.prepare(request)
+    last_seq = 0
+    try:
+        while True:
+            seq, jpeg = store.get()
+            if jpeg is not None and seq != last_seq:
+                last_seq = seq
+                await response.write(
+                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    + str(len(jpeg)).encode()
+                    + b"\r\n\r\n"
+                    + jpeg
+                    + b"\r\n"
+                )
+            else:
+                await asyncio.sleep(0.04)
+    except (asyncio.CancelledError, ConnectionError):
+        pass
+    return response
+
+
+def create_app(
+    holder: BackendHolder,
+    broadcaster: FaceBroadcaster | None = None,
+    static_dir: str | Path | None = None,
+    frame_store: FrameStore | None = None,
+) -> web.Application:
     app = web.Application(middlewares=[_cors], client_max_size=512 * 1024 * 1024)
     app["holder"] = holder
     app["started_at"] = time.time()
@@ -200,8 +268,39 @@ def create_app(holder: BackendHolder) -> web.Application:
     app.router.add_post("/api/backend", _switch_backend)
     app.router.add_post("/api/photo", _photo)
     app.router.add_post("/api/video", _video)
+    app.router.add_get("/api/camera/stream", _camera_mjpeg)  # 始终注册，无摄像头时 503
+    if frame_store is not None:
+        app["frame_store"] = frame_store
+    if broadcaster is not None:
+        app["broadcaster"] = broadcaster
+
+        async def _bind_loop(_app):
+            broadcaster.bind_loop(asyncio.get_running_loop())
+
+        app.on_startup.append(_bind_loop)
+        app.router.add_get("/ws/face", _ws_face)
+    # 静态托管放最后注册：它是前缀匹配，不能抢 /api 与 /ws 的路由
+    static_path = Path(static_dir) if static_dir else None
+    if static_path and static_path.is_dir():
+        index_file = static_path / "index.html"
+
+        async def _index(_request):
+            return web.FileResponse(index_file)
+
+        app.router.add_get("/", _index)
+        app.router.add_static("/", path=static_path, show_index=False)
     return app
 
 
-def run_server(holder: BackendHolder, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-    web.run_app(create_app(holder), host=host, port=port, print=None)
+def run_server(
+    holder: BackendHolder,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    broadcaster: FaceBroadcaster | None = None,
+    static_dir: str | Path | None = None,
+    frame_store: FrameStore | None = None,
+) -> None:
+    web.run_app(
+        create_app(holder, broadcaster=broadcaster, static_dir=static_dir, frame_store=frame_store),
+        host=host, port=port, print=None,
+    )

@@ -1,13 +1,17 @@
-"""摄像头采集 -> 当前后端推理 -> miniface-frame 推给 fusion 服务器（ws :8765）。
+"""摄像头采集 -> 当前后端推理 -> miniface-frame 分发到各个出口。
 
-对应 miniface 的角色：fusion/server.mjs 在 :8765 上等这个消息。
-fusion 没启动也没关系 —— 本模块会每 1 秒重试连接，连上后自动开始推流。
+出口有两种，可单独或同时启用：
+- sink 回调（通常是 broadcaster.FaceBroadcaster.publish）：进程内广播给前端；
+- fusion 服务器（ws :8765）：兼容旧的 fusion/server.mjs 链路，传 --fusion 时启用。
+
+fusion 不在线时每 1 秒重试连接；sink 侧无客户端时消息自然丢弃，采集不等人。
 """
 from __future__ import annotations
 
 import json
 import threading
 import time
+from typing import Callable
 
 import cv2
 import websocket  # websocket-client
@@ -22,13 +26,17 @@ class CameraStreamer:
     def __init__(
         self,
         holder: BackendHolder,
-        fusion_url: str = DEFAULT_FUSION_URL,
+        fusion_url: str | None = None,
+        sink: Callable[[dict], None] | None = None,
+        frame_sink: Callable[[bytes], None] | None = None,
         camera_index: int = 0,
         width: int = 640,
         height: int = 480,
     ):
         self._holder = holder
         self._fusion_url = fusion_url
+        self._sink = sink
+        self._frame_sink = frame_sink
         self._camera_index = camera_index
         self._width = width
         self._height = height
@@ -56,7 +64,7 @@ class CameraStreamer:
             return None
 
     def run_forever(self) -> None:
-        """阻塞循环，直到 stop()。采集 / 推理始终进行，只有发送依赖 fusion 在线。"""
+        """阻塞循环，直到 stop()。采集 / 推理始终进行，发送依赖各出口在线。"""
         cap = None
         while cap is None and not self._stop.is_set():
             cap = self._open_camera()
@@ -80,38 +88,45 @@ class CameraStreamer:
                         cap = self._open_camera()
                     continue
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                if self._frame_sink is not None:
+                    ok_enc, jpeg = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70]
+                    )
+                    if ok_enc:
+                        self._frame_sink(jpeg.tobytes())
                 timestamp_ms = int((time.perf_counter() - t0) * 1000)
                 result = self._holder.infer(rgb, timestamp_ms)
                 frames += 1
                 now = time.perf_counter()
                 if result is not None:
-                    if ws is None and now - last_connect_try >= 1.0:
-                        last_connect_try = now
-                        ws = self._connect()
-                    if ws is not None:
-                        try:
-                            ws.send(
-                                json.dumps(
-                                    build_face_frame(
-                                        result.blendshapes,
-                                        pts=time.time(),
-                                        head_euler=result.head_euler,
-                                    )
-                                )
-                            )
-                            sent += 1
-                        except Exception:
-                            print("[camera] fusion connection lost")
+                    msg = build_face_frame(
+                        result.blendshapes,
+                        pts=time.time(),
+                        head_euler=result.head_euler,
+                        landmarks=result.landmarks,
+                    )
+                    if self._sink is not None:
+                        self._sink(msg)
+                    if self._fusion_url is not None:
+                        if ws is None and now - last_connect_try >= 1.0:
+                            last_connect_try = now
+                            ws = self._connect()
+                        if ws is not None:
                             try:
-                                ws.close()
+                                ws.send(json.dumps(msg, ensure_ascii=False))
+                                sent += 1
                             except Exception:
-                                pass
-                            ws = None
+                                print("[camera] fusion connection lost")
+                                try:
+                                    ws.close()
+                                except Exception:
+                                    pass
+                                ws = None
                 if now - stat_at >= 2.0:
                     dt = now - stat_at
                     stats = self._holder.stats()
                     print(
-                        f"[camera] {frames / dt:.1f} FPS | sent {sent / dt:.1f} FPS | "
+                        f"[camera] {frames / dt:.1f} FPS | fusion-sent {sent / dt:.1f} FPS | "
                         f"backend {self._holder.name} | infer avg {stats['avgMs']} ms"
                     )
                     frames = 0

@@ -89,8 +89,13 @@ def array_to_categories(scores) -> list[dict]:
     ]
 
 
-def build_face_frame(scores, pts: float | None = None, head_euler: dict | None = None) -> dict:
-    """组装一条 miniface-frame 消息（可直接 json.dumps 后发给 fusion）。"""
+def build_face_frame(scores, pts: float | None = None, head_euler: dict | None = None,
+                     landmarks=None) -> dict:
+    """组装一条 miniface-frame 消息（可直接 json.dumps 后发给 fusion 或前端）。
+
+    landmarks 为可选项：(478, 3) 归一化关键点，拍平成 1434 个保留 4 位小数的
+    浮点列表，供前端的 2D 网格叠加层使用；不需要网格的下游忽略该字段即可。
+    """
     msg = {
         "type": FRAME_TYPE,
         "pts": time.time() if pts is None else float(pts),
@@ -98,4 +103,9 @@ def build_face_frame(scores, pts: float | None = None, head_euler: dict | None =
     }
     if head_euler is not None:
         msg["headEuler"] = {k: float(v) for k, v in head_euler.items()}
+    if landmarks is not None:
+        arr = np.asarray(landmarks, dtype=np.float32).reshape(-1)
+        if arr.size != 478 * 3:
+            raise ValueError(f"expected 1434 landmark values, got {arr.size}")
+        msg["landmarks"] = [round(float(v), 4) for v in arr]
     return msg

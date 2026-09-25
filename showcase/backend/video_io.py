@@ -47,6 +47,10 @@ def iter_video_results(
                     item["blendshapes"] = array_to_categories(result.blendshapes)
                     if result.head_euler is not None:
                         item["headEuler"] = result.head_euler
+                    if result.landmarks is not None:
+                        item["landmarks"] = [
+                            round(float(v), 4) for v in result.landmarks.reshape(-1)
+                        ]
                 yield item
                 produced += 1
                 if max_frames is not None and produced >= max_frames:

@@ -15,11 +15,12 @@ from pathlib import Path
 
 import cv2
 
-from .camera_stream import DEFAULT_FUSION_URL, CameraStreamer
+from .broadcaster import FaceBroadcaster
+from .camera_stream import CameraStreamer
 from .contract import array_to_categories
 from .holder import BackendHolder
 from .perception import create_backend, list_backends
-from .service import DEFAULT_HOST, DEFAULT_PORT, run_server
+from .service import DEFAULT_FRONTEND_DIR, DEFAULT_HOST, DEFAULT_PORT, FrameStore, run_server
 from .video_io import iter_video_results
 
 
@@ -41,20 +42,35 @@ def _make_holder_or_exit(name: str) -> BackendHolder:
 
 def _cmd_serve(args) -> int:
     holder = _make_holder_or_exit(args.backend)
+    broadcaster = FaceBroadcaster()
+    frame_store = None
     streamer = None
     if not args.no_camera:
+        frame_store = FrameStore()
         streamer = CameraStreamer(
             holder,
-            fusion_url=args.fusion,
+            fusion_url=args.fusion,  # None = 不推 fusion，只走进程内广播
+            sink=broadcaster.publish,
+            frame_sink=frame_store.set,
             camera_index=args.camera,
             width=args.width,
             height=args.height,
         )
         streamer.start_in_thread()
-    print(f"[serve] backend={holder.name}  control=http://{args.host}:{args.port}  "
-          f"fusion={'off' if streamer is None else args.fusion}")
+    static_dir = Path(args.static_dir) if args.static_dir else DEFAULT_FRONTEND_DIR
+    serve_static = static_dir.is_dir() and not args.no_static
+    print(f"[serve] backend={holder.name}  frontend+api=http://{args.host}:{args.port}  "
+          f"static={'off' if not serve_static else static_dir}  "
+          f"fusion={'off' if args.fusion is None else args.fusion}")
     try:
-        run_server(holder, host=args.host, port=args.port)
+        run_server(
+            holder,
+            host=args.host,
+            port=args.port,
+            broadcaster=broadcaster,
+            static_dir=static_dir if serve_static else None,
+            frame_store=frame_store,
+        )
     finally:
         if streamer is not None:
             streamer.stop()
@@ -111,15 +127,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("serve", help="启动 HTTP 服务面 + 摄像头实时推流")
+    p = sub.add_parser("serve", help="启动 HTTP/WS 服务 + 静态托管 + 摄像头实时推流")
     p.add_argument("--host", default=DEFAULT_HOST)
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--backend", default="mediapipe-task", help="底层模型后端名")
-    p.add_argument("--fusion", default=DEFAULT_FUSION_URL, help="fusion 服务器 ws 地址")
+    p.add_argument("--fusion", default=None,
+                   help="可选：fusion 服务器 ws 地址（如 ws://127.0.0.1:8765），兼容旧链路")
     p.add_argument("--camera", type=int, default=0, help="摄像头编号")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
-    p.add_argument("--no-camera", action="store_true", help="只开 HTTP 服务面，不采摄像头")
+    p.add_argument("--no-camera", action="store_true", help="只开服务面，不采摄像头")
+    p.add_argument("--static-dir", default=None, help=f"前端目录，默认 {DEFAULT_FRONTEND_DIR}")
+    p.add_argument("--no-static", action="store_true", help="不托管前端静态文件")
     p.set_defaults(func=_cmd_serve)
 
     p = sub.add_parser("image", help="单张照片 -> BlendShape JSON")
