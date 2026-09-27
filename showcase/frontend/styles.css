@@ -465,10 +465,12 @@ body {
   color: #fff;
 }
 
-/* ---------- 版本切换（A 面部 / B 全身） ---------- */
+/* ---------- 版本切换（A 面部 / B 全身）：输入卡虚线框下方 ---------- */
 .mode-switch {
   display: flex;
   gap: 4px;
+  align-self: center;
+  margin-top: 14px;
   background: #EAE6DF;
   border: 1px solid #D1C7A5;
   border-radius: 6px;
