@@ -14,11 +14,18 @@ import numpy as np
 
 @dataclass
 class FaceResult:
-    """单帧感知结果。blendshapes 顺序固定为 contract.BLENDSHAPE_NAMES。"""
+    """单帧感知结果。blendshapes 顺序固定为 contract.BLENDSHAPE_NAMES。
+
+    pose / hand 字段只有 mediapipe-full（B 版本）后端会填，其余后端留 None。
+    """
 
     blendshapes: np.ndarray            # (52,) float32，取值 [0, 1]
     landmarks: np.ndarray | None = None  # (478, 3) 归一化坐标，供 3D 网格叠加层用
     head_euler: dict | None = None       # {"x", "y", "z"} 头部欧拉角，单位度
+    pose_image: np.ndarray | None = None  # (33, 4) x,y,z,visibility，图像归一化坐标
+    pose_world: np.ndarray | None = None  # (33, 4) 世界坐标（米），Kalidokit 用
+    hand_left: np.ndarray | None = None   # (21, 3) 归一化坐标
+    hand_right: np.ndarray | None = None  # (21, 3) 归一化坐标
 
 
 @dataclass

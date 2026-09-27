@@ -2,6 +2,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin } from "@pixiv/three-vrm";
+import { Rig } from "./rig.js";
 
 function bs(scoreMap, name) {
   return scoreMap.get(name) ?? 0;
@@ -89,7 +90,17 @@ export class Avatar {
     this.vrm = gltf.userData.vrm;
     this.vrm.scene.rotation.y = Math.PI; // 面向镜头
     this.scene.add(this.vrm.scene);
+    this.rig = new Rig(this.vrm); // 骨骼驱动（Kalidokit）
     this.ready = true;
+  }
+
+  // poseImage / poseWorld: flat 33×4；hands: {left, right} flat 21×3
+  setPose(poseImage, poseWorld) {
+    if (this.rig) this.rig.applyPose(poseImage, poseWorld);
+  }
+
+  setHands(hands) {
+    if (this.rig) this.rig.applyHands(hands);
   }
 
   // 鼠标拖拽旋转 + 滚轮缩放（手动视角变换）

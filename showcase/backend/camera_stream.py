@@ -104,6 +104,10 @@ class CameraStreamer:
                         pts=time.time(),
                         head_euler=result.head_euler,
                         landmarks=result.landmarks,
+                        pose_image=result.pose_image,
+                        pose_world=result.pose_world,
+                        hand_left=result.hand_left,
+                        hand_right=result.hand_right,
                     )
                     if self._sink is not None:
                         self._sink(msg)

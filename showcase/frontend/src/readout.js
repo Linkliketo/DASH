@@ -1,10 +1,11 @@
-// 签名元素：实时表情读数（时间轴样式）
-// 固定轨道、固定顺序：每条轨道 x 轴 = 最近 10 秒（右缘 = 现在），y 轴 = 分数。
+// 签名元素：实时表情读数（时间轴样式，分组版）
+// 固定轨道、固定顺序：每条轨道 x 轴 = 最近 10 秒（右缘 = 现在），y 轴 = 数值 [0,1]。
 // 没有返回值时轨道照常推进、值为 0 —— 行不增删、不重排，减少无序变动。
+// 分组：A 版本只有「面部」组；B 版本加「骨骼框架」「手部骨骼」组。
 const WINDOW_MS = 10_000;
 
-// 固定轨道（顺序 = 显示顺序）：覆盖皮套人实际驱动的 VRM expression 来源
-const TRACKS = [
+// 面部组：覆盖皮套人实际驱动的 VRM expression 来源
+export const FACE_TRACKS = [
   "eyeBlinkLeft",
   "eyeBlinkRight",
   "browInnerUp",
@@ -15,22 +16,52 @@ const TRACKS = [
   "mouthSmileRight",
 ];
 
+export const GROUPS_A = [{ title: "面部 FACE", tracks: FACE_TRACKS }];
+
+export const GROUPS_B = [
+  { title: "面部 FACE", tracks: FACE_TRACKS },
+  {
+    title: "骨骼框架 SKELETON",
+    tracks: ["shoulderLiftL", "shoulderLiftR", "elbowCurlL", "elbowCurlR", "spineLean"],
+  },
+  {
+    title: "手部骨骼 HANDS",
+    tracks: ["indexCurlL", "indexCurlR", "fistL", "fistR"],
+  },
+];
+
 export class Readout {
-  constructor(container, tracks = TRACKS) {
+  constructor(container, groups = GROUPS_A) {
     this.container = container;
     this.windowMs = WINDOW_MS;
     this.rows = [];
-    for (const name of tracks) this.rows.push(this._row(name));
+    this.rebuild(groups);
   }
 
-  _row(name) {
+  // 按版本重建分组（A/B 切换时调用）
+  rebuild(groups) {
+    this.container.innerHTML = "";
+    this.rows = [];
+    for (const group of groups) {
+      const box = document.createElement("div");
+      box.className = "readout-group";
+      const title = document.createElement("div");
+      title.className = "readout-group-title mono";
+      title.textContent = group.title;
+      box.appendChild(title);
+      this.container.appendChild(box);
+      for (const name of group.tracks) this.rows.push(this._row(box, name));
+    }
+  }
+
+  _row(parent, name) {
     const el = document.createElement("div");
     el.className = "readout-row";
     el.innerHTML = `
       <span class="readout-name">${name}</span>
       <canvas class="readout-track"></canvas>
       <span class="readout-value mono">0.00</span>`;
-    this.container.appendChild(el);
+    parent.appendChild(el);
     return {
       name,
       canvas: el.querySelector(".readout-track"),
@@ -53,7 +84,6 @@ export class Readout {
     const h = canvas.height;
     ctx.clearRect(0, 0, w, h);
 
-    // 中线参考
     ctx.strokeStyle = "rgba(30,41,59,0.12)";
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -78,7 +108,6 @@ export class Readout {
     ctx.strokeStyle = "#2563EB";
     ctx.lineWidth = Math.max(1.5, dpr);
     ctx.stroke();
-    // 线下半透明填充
     ctx.lineTo(w, h);
     ctx.lineTo(((samples[0][0] - t0) / this.windowMs) * w, h);
     ctx.closePath();
@@ -86,12 +115,14 @@ export class Readout {
     ctx.fill();
   }
 
-  // cats: [{categoryName, score}]，每帧调用；传 [] 或空 = 全部按 0 推进
-  update(cats) {
+  // cats: [{categoryName, score}]（面部）；extras: {name: value}（骨骼/手部派生指标）。
+  // 两者都可空 —— 空即按 0 推进。
+  update(cats, extras) {
     const now = performance.now();
     const cutoff = now - this.windowMs;
     const scores = new Map();
     if (cats) for (const c of cats) scores.set(c.categoryName, c.score);
+    if (extras) for (const [k, v] of Object.entries(extras)) scores.set(k, v);
     for (const row of this.rows) {
       const v = scores.get(row.name) ?? 0;
       row.samples.push([now, v]);

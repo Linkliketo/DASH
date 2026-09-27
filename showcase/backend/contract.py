@@ -89,12 +89,23 @@ def array_to_categories(scores) -> list[dict]:
     ]
 
 
+def _flat(arr, size: int, name: str) -> list[float]:
+    """ndarray → 保留 4 位小数的 flat 浮点列表，尺寸不符报错。"""
+    a = np.asarray(arr, dtype=np.float32).reshape(-1)
+    if a.size != size:
+        raise ValueError(f"{name}: expected {size} values, got {a.size}")
+    return [round(float(v), 4) for v in a]
+
+
 def build_face_frame(scores, pts: float | None = None, head_euler: dict | None = None,
-                     landmarks=None) -> dict:
+                     landmarks=None, pose_image=None, pose_world=None,
+                     hand_left=None, hand_right=None) -> dict:
     """组装一条 miniface-frame 消息（可直接 json.dumps 后发给 fusion 或前端）。
 
     landmarks 为可选项：(478, 3) 归一化关键点，拍平成 1434 个保留 4 位小数的
     浮点列表，供前端的 2D 网格叠加层使用；不需要网格的下游忽略该字段即可。
+    pose / hands 段仅 B 版本（mediapipe-full）填充：pose 含图像坐标与世界坐标
+    两组 33 点（Kalidokit rigging 用），hands 为左右手各 21 点。
     """
     msg = {
         "type": FRAME_TYPE,
@@ -104,8 +115,17 @@ def build_face_frame(scores, pts: float | None = None, head_euler: dict | None =
     if head_euler is not None:
         msg["headEuler"] = {k: float(v) for k, v in head_euler.items()}
     if landmarks is not None:
-        arr = np.asarray(landmarks, dtype=np.float32).reshape(-1)
-        if arr.size != 478 * 3:
-            raise ValueError(f"expected 1434 landmark values, got {arr.size}")
-        msg["landmarks"] = [round(float(v), 4) for v in arr]
+        msg["landmarks"] = _flat(landmarks, 478 * 3, "landmarks")
+    if pose_image is not None or pose_world is not None:
+        pose = {}
+        if pose_image is not None:
+            pose["image"] = _flat(pose_image, 33 * 4, "pose_image")
+        if pose_world is not None:
+            pose["world"] = _flat(pose_world, 33 * 4, "pose_world")
+        msg["pose"] = pose
+    if hand_left is not None or hand_right is not None:
+        msg["hands"] = {
+            "left": _flat(hand_left, 21 * 3, "hand_left") if hand_left is not None else None,
+            "right": _flat(hand_right, 21 * 3, "hand_right") if hand_right is not None else None,
+        }
     return msg

@@ -2,8 +2,9 @@
 import * as api from "./api.js";
 import { Avatar } from "./avatar.js";
 import { MeshOverlay } from "./mesh.js";
-import { Readout } from "./readout.js";
+import { Readout, GROUPS_A, GROUPS_B } from "./readout.js";
 import { SourceInput } from "./input.js";
+import { poseMetrics, handMetrics } from "./metrics.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -37,8 +38,15 @@ let state = "landing"; // landing | camera | photo | video
 let ws = null;
 let wsReconnectTimer = null;
 let lastFaceMsgAt = 0;
+let lastFacePresentAt = 0; // 最近一次「帧内有人脸」的时刻
 let faceMsgCount = 0;
 let videoFrames = []; // video 模式：后端逐帧结果（按 timestampMs 升序）
+
+// 版本：A 面部 / B 全身（对应后端 mediapipe-task / mediapipe-full）
+const MODE_BACKENDS = { a: "mediapipe-task", b: "mediapipe-full" };
+const MODE_GROUPS = { a: GROUPS_A, b: GROUPS_B };
+const MODE_VIEWS = { a: ["head"], b: ["head", "half", "full"] };
+let mode = "a";
 
 const input = new SourceInput({ box: els.sourceBox, image: els.sourceImage, video: els.sourceVideo });
 const mesh = new MeshOverlay(els.meshCanvas);
@@ -66,14 +74,37 @@ function flatLandmarks(lm) {
   return lm; // WS / video NDJSON 的 flat 形式
 }
 
-function applyFrame({ blendshapes, headEuler, landmarks }) {
-  if (blendshapes) {
+function applyFrame({ blendshapes, headEuler, landmarks, pose, hands }) {
+  const facePresent = !!landmarks;
+  if (facePresent) {
+    lastFacePresentAt = performance.now();
+    els.nofaceBadge.hidden = true;
     avatar.setBlendshapes(blendshapes);
-    readout.update(blendshapes);
+    if (headEuler) avatar.setHeadEuler(headEuler);
     els.renderIdle.hidden = true;
   }
-  if (headEuler) avatar.setHeadEuler(headEuler);
-  mesh.draw(flatLandmarks(landmarks));
+  mesh.draw(facePresent ? flatLandmarks(landmarks) : null);
+  // 骨骼与手部（仅 B 版本的消息带这两段）
+  const extras = {};
+  if (pose && avatar.rig) {
+    avatar.setPose(pose.image, pose.world);
+    Object.assign(extras, poseMetrics(pose.image) || {});
+    els.renderIdle.hidden = true;
+  }
+  if (hands && avatar.rig) {
+    avatar.setHands(hands);
+    const lm = handMetrics(hands.left);
+    const rm = handMetrics(hands.right);
+    if (lm) {
+      extras.indexCurlL = lm.indexCurl;
+      extras.fistL = lm.fist;
+    }
+    if (rm) {
+      extras.indexCurlR = rm.indexCurl;
+      extras.fistR = rm.fist;
+    }
+  }
+  readout.update(facePresent ? blendshapes : [], extras);
 }
 
 /* ---------------- 状态切换 ---------------- */
@@ -219,11 +250,44 @@ async function onBackendChange() {
   try {
     await api.switchBackend(name);
     setStatus(`后端已切换：${name}`);
+    syncModeUI(name === "mediapipe-full" ? "b" : "a"); // 下拉与版本开关联动
   } catch (e) {
     setStatus(String(e.message || e));
   } finally {
     await refreshBackends();
   }
+}
+
+/* ---------------- 版本切换（A 面部 / B 全身） ---------------- */
+function syncModeUI(next) {
+  mode = next;
+  document.querySelectorAll(".mode-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.mode === next)
+  );
+  const views = MODE_VIEWS[next];
+  document.querySelectorAll(".view-btn").forEach((b) => {
+    b.hidden = !views.includes(b.dataset.view);
+  });
+  const current = document.querySelector(".view-btn.active")?.dataset.view;
+  const view = views.includes(current) ? current : next === "b" ? "full" : "head";
+  document.querySelectorAll(".view-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.view === view)
+  );
+  if (avatar) avatar.setView(view);
+  readout.rebuild(MODE_GROUPS[next]);
+}
+
+async function setMode(next, { persist = true } = {}) {
+  if (!MODE_BACKENDS[next]) return;
+  syncModeUI(next);
+  if (persist) localStorage.setItem("dash.mode", next);
+  try {
+    await api.switchBackend(MODE_BACKENDS[next]); // 版本切换 = 后端热切换
+    setStatus(next === "b" ? "全身版已就绪（面部+骨骼+手部）" : "面部版已就绪");
+  } catch (e) {
+    setStatus(String(e.message || e));
+  }
+  refreshBackends();
 }
 
 /* ---------------- 事件绑定 ---------------- */
@@ -236,6 +300,9 @@ function bindEvents() {
   els.meshToggle.addEventListener("change", () => {
     mesh.enabled = els.meshToggle.checked;
     if (!mesh.enabled) mesh.clear();
+  });
+  document.querySelectorAll(".mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setMode(btn.dataset.mode));
   });
   document.querySelectorAll(".view-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -275,7 +342,8 @@ setInterval(() => {
   if (state !== "camera") return;
   els.fps.textContent = `● ${(faceMsgCount / 2).toFixed(0)} FPS`;
   faceMsgCount = 0;
-  if (performance.now() - lastFaceMsgAt > 800 && lastFaceMsgAt > 0) {
+  // B 版本里「只有身体没有脸」也算无人脸
+  if (performance.now() - lastFacePresentAt > 800 && lastFaceMsgAt > 0) {
     els.nofaceBadge.hidden = false;
   }
 }, 2000);
@@ -310,14 +378,6 @@ async function boot() {
     showOverlay("这个浏览器不支持 WebGL，换 Chrome / Edge 试试", false);
     return;
   }
-  // 应用记忆的默认视角（localStorage）
-  const savedView = localStorage.getItem("dash.view");
-  if (savedView && Avatar.VIEWS[savedView]) {
-    avatar.setView(savedView);
-    document.querySelectorAll(".view-btn").forEach((b) =>
-      b.classList.toggle("active", b.dataset.view === savedView)
-    );
-  }
   try {
     await api.health();
   } catch {
@@ -329,6 +389,16 @@ async function boot() {
     await avatar.load("assets/three-vrm-girl.vrm");
   } catch (e) {
     showOverlay(`皮套人模型没加载成功：${e.message || e}`, true);
+  }
+  // 恢复上次版本（默认 A 面部版）与视角
+  const savedMode = localStorage.getItem("dash.mode");
+  await setMode(savedMode && MODE_BACKENDS[savedMode] ? savedMode : "a", { persist: false });
+  const savedView = localStorage.getItem("dash.view");
+  if (savedView && MODE_VIEWS[mode].includes(savedView)) {
+    avatar.setView(savedView);
+    document.querySelectorAll(".view-btn").forEach((b) =>
+      b.classList.toggle("active", b.dataset.view === savedView)
+    );
   }
 }
 
