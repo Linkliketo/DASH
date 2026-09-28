@@ -151,8 +151,8 @@ function backToLanding() {
   els.btnSecondary.hidden = true;
   els.nofaceBadge.hidden = true;
   els.renderIdle.hidden = false;
-  els.stripTitle.textContent = "近期示例 · 来自我们的工作室";
-  els.stripTag.textContent = "PINBOARD SAMPLES";
+  els.stripTitle.textContent = "了解更多";
+  els.stripTag.textContent = "LEARN MORE";
   setStatus("待机");
   els.fps.textContent = "";
 }
@@ -387,8 +387,13 @@ function entrance() {
     .from("#output-card", { y: 40, autoAlpha: 0, rotation: 1.1, duration: 0.6 }, "-=0.45")
     .from("#strip", { y: 24, autoAlpha: 0, duration: 0.5 }, "-=0.35")
     .from(".pushpin", { scale: 0, duration: 0.35, ease: "back.out(3)", stagger: 0.08 }, "-=0.2")
-    .from(".polaroid", { y: 16, autoAlpha: 0, stagger: 0.08, duration: 0.4 }, "-=0.3")
+    .from(".link-card", { y: 16, autoAlpha: 0, stagger: 0.08, duration: 0.4 }, "-=0.3")
     .from(".rail-box", { autoAlpha: 0, y: -8, stagger: 0.1, duration: 0.35 }, "-=0.2");
+  // 后台标签页里 rAF 冻结会导致入场停在透明态：超时后清掉动画内联样式兜底
+  setTimeout(() => {
+    gsap.set("#statusbar, #input-card, #output-card, #strip, .pushpin, .link-card, .rail-box",
+             { clearProps: "all" });
+  }, 3000);
 }
 
 /* ---------------- 启动 ---------------- */

@@ -337,31 +337,34 @@ body {
   letter-spacing: 0.05em;
   color: var(--muted);
 }
-.polaroid-row {
+/* ---------- 了解更多（链接卡） ---------- */
+.link-row {
   display: flex;
-  gap: 32px;
+  gap: 24px;
   justify-content: center;
+  flex-wrap: wrap;
 }
-.polaroid {
-  width: 130px;
+.link-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 190px;
   background: #fff;
   border: 1px solid rgba(30, 41, 59, 0.12);
   border-radius: 2px;
-  padding: 10px 10px 14px;
-  box-shadow: 2px 6px 8px rgba(45, 35, 25, 0.24);
+  padding: 14px 18px;
+  box-shadow: 2px 6px 8px rgba(45, 35, 25, 0.18);
+  text-decoration: none;
+  color: var(--ink);
   transition: transform var(--dur-base) var(--ease-spring);
 }
-.polaroid:nth-child(odd)  { transform: rotate(-1.4deg); }
-.polaroid:nth-child(even) { transform: rotate(1.2deg); }
-.polaroid:hover { transform: rotate(0deg) translateY(-4px); }
-.polaroid img { width: 100%; height: 100px; object-fit: cover; border-radius: 1px; display: block; }
-.polaroid figcaption {
-  margin-top: 8px;
-  font-size: 11px;
-  font-weight: 500;
-  text-align: center;
-  color: var(--ink-soft);
-}
+.link-card:nth-child(odd)  { transform: rotate(-0.8deg); }
+.link-card:nth-child(even) { transform: rotate(0.8deg); }
+a.link-card:hover { transform: rotate(0deg) translateY(-4px); }
+.link-card b { font-size: 14px; }
+.link-card span { font-size: 11px; color: var(--muted); }
+.link-note { background: #FEF08A; border-color: #EAB308; }
+.link-note b, .link-note span { color: #854D0E; }
 
 /* ---------- 读数条（签名元素：时间轴） ---------- */
 .readout { display: flex; flex-direction: column; gap: 8px; }

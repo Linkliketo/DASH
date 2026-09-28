@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DASH · 微表情皮套人</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=2">
 <script type="importmap">
 {"imports":{
   "three": "./vendor/three.module.js",
@@ -112,14 +112,26 @@
       <span class="pushpin pin-yellow"></span>
       <span class="pushpin pin-green"></span>
       <div class="strip-head">
-        <h3 id="strip-title">近期示例 · 来自我们的工作室</h3>
-        <span class="mono strip-tag" id="strip-tag">PINBOARD SAMPLES</span>
+        <h3 id="strip-title">了解更多</h3>
+        <span class="mono strip-tag" id="strip-tag">LEARN MORE</span>
       </div>
-      <div class="polaroid-row" id="polaroid-row">
-        <figure class="polaroid"><img src="assets/img/polaroid-clay-vase.png" alt=""><figcaption class="mono">示例 #1</figcaption></figure>
-        <figure class="polaroid"><img src="assets/img/polaroid-retro-camera.png" alt=""><figcaption class="mono">示例 #2</figcaption></figure>
-        <figure class="polaroid"><img src="assets/img/polaroid-bonsai-tree.png" alt=""><figcaption class="mono">示例 #3</figcaption></figure>
-        <figure class="polaroid"><img src="assets/img/polaroid-classic-boot.png" alt=""><figcaption class="mono">示例 #4</figcaption></figure>
+      <div class="link-row" id="polaroid-row">
+        <a class="link-card" href="https://github.com/Linkliketo/DASH" target="_blank" rel="noopener">
+          <b>GitHub 项目</b>
+          <span class="mono">github.com/Linkliketo/DASH</span>
+        </a>
+        <a class="link-card" href="https://github.com/Linkliketo" target="_blank" rel="noopener">
+          <b>作者主页</b>
+          <span class="mono">github.com/Linkliketo</span>
+        </a>
+        <a class="link-card" href="mailto:link@cug.edu.cn">
+          <b>作者邮箱</b>
+          <span class="mono">link@cug.edu.cn</span>
+        </a>
+        <div class="link-card link-note">
+          <b>如有疑问</b>
+          <span>请邮件联系</span>
+        </div>
       </div>
       <div class="readout" id="readout" hidden></div>
     </aside>
@@ -149,6 +161,6 @@
   </div>
 </div>
 
-<script type="module" src="src/main.js"></script>
+<script type="module" src="src/main.js?v=2"></script>
 </body>
 </html>
