@@ -67,16 +67,13 @@ export class Rig {
     const image = toPoints(poseImageFlat, 4);
     const world = toPoints(poseWorldFlat, 4);
     if (!image || !world || !this.vrm) return;
-    // 低可见度的垃圾姿态会让网格炸成刺球：整帧丢弃，保持上一帧好姿态
-    const meanVis =
-      image.reduce((s, p) => s + (p.visibility ?? 1), 0) / image.length;
-    if (meanVis < 0.4) return;
+    // 关键驱动点（双肩 + 双髋）可见度不足时整帧丢弃，防垃圾姿态炸网格
+    const keyVis = [11, 12, 23, 24].reduce((s, i) => s + (image[i]?.visibility ?? 0), 0) / 4;
+    if (keyVis < 0.5) return;
     const rigged = Pose.solve(world, image, { runtime: "mediapipe" });
     if (!rigged) return;
-    if (rigged.Hips?.position) {
-      const p = rigged.Hips.position;
-      this.vrm.scene.position.set(-p.x, p.y + 0.05, -p.z);
-    }
+    // 不应用 Hips 位移：demo 场景人始终在镜头前居中，世界坐标噪声会把模型推出画面；
+    // 转身 / 前倾由 Hips / Spine 旋转表达已经足够。
     for (const [key, boneName] of Object.entries(BONES)) {
       const part = rigged[key];
       if (part) setBone(this._bone(boneName), part.rotation || part);

@@ -196,6 +196,24 @@ export class Avatar {
       z: cap(rad(headEuler.z) * 0.3),
     };
   }
+
+  // 复位：骨骼回标准姿态、表情清零、头部跟随复位、位移归零（停止演示时调用）
+  resetPose() {
+    if (!this.vrm) return;
+    try {
+      this.vrm.humanoid.resetNormalizedPose();
+    } catch {}
+    this.vrm.scene.position.set(0, 0, 0);
+    const E = this.vrm.expressionManager;
+    if (E) {
+      for (const name of ["blink", "aa", "joy", "sorrow", "angry", "surprise",
+                          "lookUp", "lookDown", "lookLeft", "lookRight"]) {
+        try { E.setValue(name, 0); } catch {}
+      }
+    }
+    this._headTarget = { x: 0, y: 0, z: 0 };
+    this._headCur = { x: 0, y: 0, z: 0 };
+  }
 }
 
 Avatar.VIEWS = {

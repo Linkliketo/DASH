@@ -47,6 +47,7 @@ const MODE_BACKENDS = { a: "mediapipe-task", b: "mediapipe-full" };
 const MODE_GROUPS = { a: GROUPS_A, b: GROUPS_B };
 const MODE_VIEWS = { a: ["head"], b: ["head", "half", "full"] };
 let mode = "a";
+let expectedBackend = MODE_BACKENDS[mode]; // 页面认定的后端；服务重启 / 切换失败时用它对齐
 
 const input = new SourceInput({ box: els.sourceBox, image: els.sourceImage, video: els.sourceVideo });
 const mesh = new MeshOverlay(els.meshCanvas);
@@ -134,6 +135,14 @@ function backToLanding() {
   mesh.clear();
   readout.reset();
   videoFrames = [];
+  // 复位：视角回「面部」默认（远景与左右与默认面部视角一致），骨骼回标准姿态
+  if (avatar) {
+    avatar.resetPose();
+    avatar.setView("head");
+  }
+  document.querySelectorAll(".view-btn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.view === "head")
+  );
   els.sourceView.hidden = true;
   els.dropzone.hidden = false;
   els.polaroidRow.hidden = false;
@@ -249,6 +258,7 @@ async function onBackendChange() {
   els.backendSelect.disabled = true;
   try {
     await api.switchBackend(name);
+    expectedBackend = name; // 用户的主动选择也是「页面认定的后端」
     setStatus(`后端已切换：${name}`);
     syncModeUI(name === "mediapipe-full" ? "b" : "a"); // 下拉与版本开关联动
   } catch (e) {
@@ -280,15 +290,28 @@ function syncModeUI(next) {
 async function setMode(next, { persist = true } = {}) {
   if (!MODE_BACKENDS[next]) return;
   syncModeUI(next);
+  expectedBackend = MODE_BACKENDS[next];
   if (persist) localStorage.setItem("dash.mode", next);
   try {
     await api.switchBackend(MODE_BACKENDS[next]); // 版本切换 = 后端热切换
     setStatus(next === "b" ? "全身版已就绪（面部+骨骼+手部）" : "面部版已就绪");
   } catch (e) {
-    setStatus(String(e.message || e));
+    setStatus(String(e.message || e)); // 失败由周期对齐兜底重试
   }
   refreshBackends();
 }
+
+/* ---------------- 前后端对齐（服务重启 / 切换失败的自愈） ---------------- */
+setInterval(async () => {
+  try {
+    const h = await api.health();
+    if (h.activeBackend !== expectedBackend) {
+      await api.switchBackend(expectedBackend);
+      setStatus(`后端已对齐：${expectedBackend}`);
+      refreshBackends();
+    }
+  } catch {} // 后端离线时静默，下次再试
+}, 5000);
 
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
