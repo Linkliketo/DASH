@@ -95,7 +95,13 @@ class CameraStreamer:
                     if ok_enc:
                         self._frame_sink(jpeg.tobytes())
                 timestamp_ms = int((time.perf_counter() - t0) * 1000)
-                result = self._holder.infer(rgb, timestamp_ms)
+                try:
+                    result = self._holder.infer(rgb, timestamp_ms)
+                except Exception as e:
+                    # 单帧推理失败（模型热切换竞态、坏帧等）绝不许杀掉采集线程
+                    print(f"[camera] infer failed (skipping frame): {type(e).__name__}: {e}")
+                    time.sleep(0.05)
+                    continue
                 frames += 1
                 now = time.perf_counter()
                 if result is not None:

@@ -38,6 +38,19 @@ class BackendHolder:
         self._infer_ms_total += (time.perf_counter() - t0) * 1000.0
         return result
 
+    def infer_image(self, rgb: np.ndarray) -> FaceResult | None:
+        """单张静态照片：走后端专有的 IMAGE 模式（无时序状态）。"""
+        t0 = time.perf_counter()
+        with self._lock:
+            process = getattr(self._backend, "process_image", None)
+            if process is not None:
+                result = process(rgb)
+            else:  # 后端没有静态图专用路径（如 onnx-distilled）时回退
+                result = self._backend.process_frame(rgb, 0)
+        self._infer_count += 1
+        self._infer_ms_total += (time.perf_counter() - t0) * 1000.0
+        return result
+
     def switch(self, name: str, **kwargs) -> str:
         """切换到指定后端，返回新后端名。KeyError=名字不存在，RuntimeError=不可用。"""
         with self._switch_lock:

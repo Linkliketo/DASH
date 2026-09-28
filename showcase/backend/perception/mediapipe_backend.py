@@ -98,7 +98,10 @@ class MediaPipeTaskBackend:
             output_face_blendshapes=True,
         )
         self._mp = mp
+        self._model_path = path
+        self._num_faces = num_faces
         self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(options)
+        self._image_landmarker = None  # process_image 懒加载
         self._last_ts = -1
 
     def process_frame(self, rgb: np.ndarray, timestamp_ms: int) -> FaceResult | None:
@@ -126,5 +129,42 @@ class MediaPipeTaskBackend:
             head_euler=estimate_head_euler(landmarks, w, h),
         )
 
+    def process_image(self, rgb: np.ndarray) -> FaceResult | None:
+        """单张静态照片专用：IMAGE 模式，无时序状态。
+
+        与摄像头共享 VIDEO 模式实例时，单张照片在连续「无脸」帧流中会被
+        跟踪器当作离群噪声丢弃（实测必现 no face detected），
+        所以照片必须走独立的 IMAGE 模式检测器（懒加载，只建一次）。
+        """
+        if self._image_landmarker is None:
+            options = self._mp.tasks.vision.FaceLandmarkerOptions(
+                base_options=self._mp.tasks.BaseOptions(model_asset_path=str(self._model_path)),
+                running_mode=self._mp.tasks.vision.RunningMode.IMAGE,
+                num_faces=self._num_faces,
+                output_face_blendshapes=True,
+            )
+            self._image_landmarker = self._mp.tasks.vision.FaceLandmarker.create_from_options(options)
+        image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb)
+        )
+        result = self._image_landmarker.detect(image)
+        if not result.face_landmarks:
+            return None
+        if result.face_blendshapes:
+            blendshapes = blendshapes_to_array(result.face_blendshapes[0])
+        else:
+            blendshapes = np.zeros(52, dtype=np.float32)
+        landmarks = np.array(
+            [[p.x, p.y, p.z] for p in result.face_landmarks[0]], dtype=np.float32
+        )
+        h, w = rgb.shape[:2]
+        return FaceResult(
+            blendshapes=blendshapes,
+            landmarks=landmarks,
+            head_euler=estimate_head_euler(landmarks, w, h),
+        )
+
     def close(self) -> None:
         self._landmarker.close()
+        if self._image_landmarker is not None:
+            self._image_landmarker.close()

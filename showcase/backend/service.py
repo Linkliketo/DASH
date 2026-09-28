@@ -112,7 +112,7 @@ async def _photo(request: web.Request) -> web.Response:
         return _json({"error": "cannot decode image (expect jpeg/png)"}, status=400)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     t0 = time.perf_counter()
-    result = await asyncio.to_thread(holder.infer, rgb, 0)
+    result = await asyncio.to_thread(holder.infer_image, rgb)  # 静态照片走 IMAGE 模式
     inference_ms = (time.perf_counter() - t0) * 1000.0
     if result is None:
         return _json({"ok": False, "error": "no face detected"}, status=422)
@@ -142,10 +142,10 @@ async def _ws_face(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-def _video_producer(path: Path, holder: BackendHolder, stride: int, loop, queue) -> None:
+def _video_producer(path: Path, holder: BackendHolder, stride: int, max_side: int, loop, queue) -> None:
     """在普通线程里跑，把每帧结果桥接进事件循环的队列。"""
     try:
-        for item in iter_video_results(path, holder.infer, stride=stride):
+        for item in iter_video_results(path, holder.infer, stride=stride, max_side=max_side):
             loop.call_soon_threadsafe(queue.put_nowait, item)
     except Exception as e:
         loop.call_soon_threadsafe(queue.put_nowait, {"ok": False, "error": str(e)})
@@ -157,8 +157,9 @@ async def _video(request: web.Request) -> web.StreamResponse:
     holder: BackendHolder = request.app["holder"]
     try:
         stride = max(1, int(request.query.get("stride", "1")))
+        max_side = max(0, int(request.query.get("max_side", "720")))
     except ValueError:
-        return _json({"error": "stride must be a positive integer"}, status=400)
+        return _json({"error": "stride and max_side must be integers"}, status=400)
     if request.content_type != "multipart/form-data":
         return _json({"error": "expect multipart/form-data with a file field"}, status=400)
 
@@ -190,7 +191,7 @@ async def _video(request: web.Request) -> web.StreamResponse:
     queue: asyncio.Queue = asyncio.Queue()
     thread = threading.Thread(
         target=_video_producer,
-        args=(Path(tmp.name), holder, stride, loop, queue),
+        args=(Path(tmp.name), holder, stride, max_side, loop, queue),
         name="video-producer",
         daemon=True,
     )

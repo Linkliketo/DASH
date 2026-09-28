@@ -75,7 +75,7 @@ function flatLandmarks(lm) {
   return lm; // WS / video NDJSON 的 flat 形式
 }
 
-function applyFrame({ blendshapes, headEuler, landmarks, pose, hands }) {
+function applyFrame({ blendshapes, headEuler, landmarks, pose, hands }, { advanceReadout = true } = {}) {
   const facePresent = !!landmarks;
   if (facePresent) {
     lastFacePresentAt = performance.now();
@@ -85,7 +85,7 @@ function applyFrame({ blendshapes, headEuler, landmarks, pose, hands }) {
     els.renderIdle.hidden = true;
   }
   mesh.draw(facePresent ? flatLandmarks(landmarks) : null);
-  // 骨骼与手部（仅 B 版本的消息带这两段）
+  // 骨骼与手部（B 版本的消息带这两段）
   const extras = {};
   if (pose && avatar.rig) {
     avatar.setPose(pose.image, pose.world);
@@ -105,7 +105,27 @@ function applyFrame({ blendshapes, headEuler, landmarks, pose, hands }) {
       extras.fistR = rm.fist;
     }
   }
-  readout.update(facePresent ? blendshapes : [], extras);
+  if (advanceReadout) readout.update(facePresent ? blendshapes : [], extras);
+}
+
+// 预计算一帧的读数分（视频回放模式用：读数跟随视频进度而非墙钟）
+function buildScores(frame) {
+  const scores = {};
+  if (frame.blendshapes) for (const c of frame.blendshapes) scores[c.categoryName] = c.score;
+  if (frame.pose?.image) Object.assign(scores, poseMetrics(frame.pose.image) || {});
+  if (frame.hands) {
+    const lm = handMetrics(frame.hands.left);
+    const rm = handMetrics(frame.hands.right);
+    if (lm) {
+      scores.indexCurlL = lm.indexCurl;
+      scores.fistL = lm.fist;
+    }
+    if (rm) {
+      scores.indexCurlR = rm.indexCurl;
+      scores.fistR = rm.fist;
+    }
+  }
+  return scores;
 }
 
 /* ---------------- 状态切换 ---------------- */
@@ -211,7 +231,13 @@ function startVideo(file) {
   api.streamVideo(
     file,
     (item) => {
-      if (item.ok && item.blendshapes) videoFrames.push(item);
+      if (item.ok && item.blendshapes) {
+        item.scores = buildScores(item); // 读数分在入库时算一次，回放零计算
+        videoFrames.push(item);
+        if (videoFrames.length % 50 === 0) {
+          setStatus(`video · 已处理 ${videoFrames.length} 帧…`);
+        }
+      }
     },
     (err) => setStatus(String(err.message || err))
   ).then(() => {
@@ -230,8 +256,9 @@ function onVideoTime() {
     else hi = mid - 1;
   }
   if (best >= 0 && t - videoFrames[best].timestampMs < 600) {
-    applyFrame(videoFrames[best]);
+    applyFrame(videoFrames[best], { advanceReadout: false }); // 皮套人与网格用预计算数据
   }
+  readout.renderPlayback(videoFrames, t); // 读数轴跟随视频进度（可回拖）
 }
 
 /* ---------------- 后端热切换 ---------------- */

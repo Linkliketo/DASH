@@ -77,6 +77,8 @@ class MediaPipeFullBackend:
         base = mp.tasks.BaseOptions
         mode = vision.RunningMode.VIDEO
         self._mp = mp
+        self._face_task_path = paths["face"]
+        self._num_faces = num_faces
         self._face = vision.FaceLandmarker.create_from_options(
             vision.FaceLandmarkerOptions(
                 base_options=base(model_asset_path=str(paths["face"])),
@@ -100,6 +102,7 @@ class MediaPipeFullBackend:
             )
         )
         self._last_ts = -1
+        self._image_landmarker = None  # process_image 懒加载（IMAGE 模式）
         self._heavy_stride = max(1, heavy_stride)
         self._frame_no = 0
         self._last_pose: tuple[np.ndarray | None, np.ndarray | None] = (None, None)
@@ -176,3 +179,38 @@ class MediaPipeFullBackend:
         self._face.close()
         self._pose.close()
         self._hand.close()
+        if self._image_landmarker is not None:
+            self._image_landmarker.close()
+
+    def process_image(self, rgb: np.ndarray) -> FaceResult | None:
+        """单张静态照片专用：IMAGE 模式，无时序状态（见 mediapipe_backend 同名方法）。"""
+        if self._image_landmarker is None:
+            options = self._mp.tasks.vision.FaceLandmarkerOptions(
+                base_options=self._mp.tasks.BaseOptions(
+                    model_asset_path=str(self._face_task_path)
+                ),
+                running_mode=self._mp.tasks.vision.RunningMode.IMAGE,
+                num_faces=self._num_faces,
+                output_face_blendshapes=True,
+            )
+            self._image_landmarker = self._mp.tasks.vision.FaceLandmarker.create_from_options(options)
+        from ..contract import blendshapes_to_array
+
+        image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb)
+        )
+        result = self._image_landmarker.detect(image)
+        if not result.face_landmarks:
+            return None
+        blendshapes = (
+            blendshapes_to_array(result.face_blendshapes[0])
+            if result.face_blendshapes
+            else np.zeros(52, dtype=np.float32)
+        )
+        landmarks = self._lm_array(result.face_landmarks[0], with_visibility=False)
+        h, w = rgb.shape[:2]
+        return FaceResult(
+            blendshapes=blendshapes,
+            landmarks=landmarks,
+            head_euler=estimate_head_euler(landmarks, w, h),
+        )
