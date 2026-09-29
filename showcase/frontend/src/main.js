@@ -1,10 +1,10 @@
 // 状态机与组装：landing / stage(camera|photo|video)（设计 §4）
-import * as api from "./api.js";
-import { Avatar } from "./avatar.js";
-import { MeshOverlay } from "./mesh.js";
-import { Readout, GROUPS_A, GROUPS_B } from "./readout.js";
-import { SourceInput } from "./input.js";
-import { poseMetrics, handMetrics } from "./metrics.js";
+import * as api from "./api.js?v=4";
+import { Avatar } from "./avatar.js?v=4";
+import { MeshOverlay } from "./mesh.js?v=4";
+import { Readout, GROUPS_A, GROUPS_B } from "./readout.js?v=4";
+import { SourceInput } from "./input.js?v=4";
+import { poseMetrics, handMetrics } from "./metrics.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 const els = {

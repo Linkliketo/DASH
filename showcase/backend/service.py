@@ -52,6 +52,16 @@ async def _cors(request: web.Request, handler):
     return response
 
 
+@web.middleware
+async def _no_cache_static(request: web.Request, handler):
+    """静态资源强制 revalidate：模块化的前端没有构建期 hash，
+    浏览器缓存旧 JS/CSS 会造成「新 main.js + 旧 readout.js」的混搭事故。"""
+    response = await handler(request)
+    if not request.path.startswith("/api/") and not request.path.startswith("/ws/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 async def _health(request: web.Request) -> web.Response:
     holder: BackendHolder = request.app["holder"]
     return _json(
@@ -261,7 +271,7 @@ def create_app(
     static_dir: str | Path | None = None,
     frame_store: FrameStore | None = None,
 ) -> web.Application:
-    app = web.Application(middlewares=[_cors], client_max_size=512 * 1024 * 1024)
+    app = web.Application(middlewares=[_cors, _no_cache_static], client_max_size=512 * 1024 * 1024)
     app["holder"] = holder
     app["started_at"] = time.time()
     app.router.add_get("/api/health", _health)
