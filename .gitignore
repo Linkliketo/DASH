@@ -3,6 +3,7 @@ models/
 *.task
 *.tflite
 *.onnx
+*.vrm
 data/
 
 # 参考资料（体积大，本地保留不进版本库）

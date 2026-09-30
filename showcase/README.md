@@ -34,17 +34,23 @@ PowerShell（仓库根目录 `D:\DASH\V0FastTest`）：
 ```powershell
 $py = "D:\Miniconda3\python.exe"
 
-# 1. fusion 服务器（输入 :8765，广播 :8766）
-node fusion\server.mjs
-
-# 2. 感知后端（摄像头推流 + HTTP 控制面 :8770）
+# 单进程模式（推荐）：感知后端 + HTTP/WS 服务 + 静态托管前端，一条命令
 & $py -m showcase.backend serve
-# 只用 HTTP 面、不开摄像头：& $py -m showcase.backend serve --no-camera
+# 浏览器打开 http://127.0.0.1:8770/  （钉板风前端页面）
+# 前端通过 ws://127.0.0.1:8770/ws/face 订阅实时表情帧（含 landmarks）
+# 摄像头画面经 /api/camera/stream（MJPEG）显示在前端左卡
 
-# 3. viewer（任一静态服务器从仓库根起服务，例如）
-npx serve .
-# 浏览器打开 /viewer/index.html
+# 兼容模式：同时把摄像头帧推给旧的 fusion 链路
+& $py -m showcase.backend serve --fusion ws://127.0.0.1:8765
+# 此时可再开 node fusion\server.mjs + viewer\index.html（V0 融合 viewer）
+
+# 只用 API 面、不开摄像头：& $py -m showcase.backend serve --no-camera
 ```
+
+**本地资产**（按仓库政策不入库，克隆后需自行补齐）：
+
+- `frontend/assets/three-vrm-girl.vrm`：从 `viewer/models/` 拷贝
+- `frontend/assets/img/`（桌面纹理 / 拍立得 / 图标）：由 Figma 设计稿导出（溯源见 `doc/SHOWCASE_FRONTEND_DESIGN.md` §14）
 
 单张照片 / 视频文件的离线处理：
 

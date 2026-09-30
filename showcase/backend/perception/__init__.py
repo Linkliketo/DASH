@@ -9,7 +9,7 @@ service / camera_stream / cli / 测试全部只依赖这张表，不感知具体
 """
 from __future__ import annotations
 
-from . import mediapipe_backend, onnx_backend
+from . import mediapipe_backend, mediapipe_full, onnx_backend
 from .base import BackendInfo, FaceResult, PerceptionBackend
 
 __all__ = [
@@ -30,6 +30,10 @@ _FACTORIES = {
     onnx_backend.OnnxDistilledBackend.name: (
         onnx_backend.info,
         onnx_backend.OnnxDistilledBackend,
+    ),
+    mediapipe_full.MediaPipeFullBackend.name: (
+        mediapipe_full.info,
+        mediapipe_full.MediaPipeFullBackend,
     ),
 }
 

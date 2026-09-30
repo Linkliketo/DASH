@@ -4,10 +4,21 @@ from showcase.backend import perception
 from showcase.backend.perception.mediapipe_backend import DEFAULT_MODEL_PATH
 
 
-def test_list_backends_contains_both():
+def test_list_backends_contains_all():
     names = [i.name for i in perception.list_backends()]
     assert "mediapipe-task" in names
     assert "onnx-distilled" in names
+    assert "mediapipe-full" in names
+
+
+def test_full_backend_unavailable_with_missing_files():
+    with pytest.raises(RuntimeError, match="model file not found"):
+        perception.create_backend(
+            "mediapipe-full",
+            face_task="no/such/face.task",
+            pose_task="no/such/pose.task",
+            hand_task="no/such/hand.task",
+        )
 
 
 def test_mediapipe_availability_matches_model_file():
