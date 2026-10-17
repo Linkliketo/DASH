@@ -1,7 +1,8 @@
 // 性能测试：端到端 FPS / 感知推理 / rig+渲染 / 工作量长尾。
 // 数据源只允许真实媒体（内置隐藏头像 / 本地图片 / 本地视频 / 摄像头），不做合成信号。
 // 判定规则见 benchmark-rules.js：帧间隔受刷新率量化，只作诊断；判定以工作量与吞吐为准。
-import { toFrame } from "./perception.js?v=13";
+import { toFrame } from "./perception.js?v=14";
+import { inferFrame } from "./adapters/infer.js?v=14";
 import {
   TARGET_FPS,
   FRAME_BUDGET_MS,
@@ -9,7 +10,7 @@ import {
   WORK_OVER_BUDGET_WARN_RATIO,
   evaluateVerdict,
   verdictLabel,
-} from "./benchmark-rules.js?v=13";
+} from "./benchmark-rules.js?v=14";
 
 export const BENCH_SCHEMA = "dash.benchmark.v2";
 export { TARGET_FPS, FRAME_BUDGET_MS };
@@ -550,10 +551,12 @@ export class BenchmarkRunner {
           let ts = Math.round(now);
           if (ts <= lastTs) ts = lastTs + 1;
           lastTs = ts;
-          const result = landmarker.detectForVideo(frameSource, ts);
+          const frame = inferFrame(landmarker, frameSource, ts, toFrame);
           const t1 = performance.now();
-          const frame = toFrame(result);
-          if (frame) this.applyFrame?.(frame, { mirror: !!source.cameraUsed, snap: !source.cameraUsed });
+          if (frame) this.applyFrame?.(frame, {
+            mirror: !!source.cameraUsed,
+            snap: !source.cameraUsed,
+          });
           const t2 = performance.now();
           const timing = avatar.lastTiming || { rigMs: 0, renderMs: 0 };
           const workMs = t1 - t0 + (t2 - t1) + timing.rigMs + timing.renderMs;
