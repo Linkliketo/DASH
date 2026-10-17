@@ -2,10 +2,14 @@
   "models": [
     {
       "name": "face_landmarker",
+      "id": "mediapipe-face",
+      "kind": "mediapipe-task",
       "url": "models/face_landmarker.task",
       "version": "1.0.0",
       "sizeBytes": 3758596,
-      "notes": "MediaPipe 官方 FaceLandmarker（478 关键点 + 52 BlendShape）"
+      "outputSchema": "canonical-face-v1",
+      "default": true,
+      "notes": "MediaPipe 官方 FaceLandmarker：478 关键点 + 52 BlendShape。"
     }
   ]
 }

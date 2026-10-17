@@ -5,8 +5,9 @@ import { MeshOverlay } from "./mesh.js?v=6";
 import { Readout, GROUPS_A, GROUPS_B } from "./readout.js?v=6";
 import { SourceInput } from "./input.js?v=6";
 import { poseMetrics, handMetrics } from "./metrics.js?v=6";
-import * as perception from "./perception.js?v=6";
-import { ensureModel, blobToBuffer } from "./modelstore.js?v=6";
+import { createAdapter, loadManifest } from "./adapters/registry.js?v=6";
+import { hasOutput, normalizeBlendshapes } from "./adapters/adapter.js?v=6";
+import { processVideo } from "./video/pipeline.js?v=6";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -44,9 +45,12 @@ let videoFrames = []; // video 模式：本地批处理的逐帧结果
 let ready = false;    // 推理引擎 + 模型就绪前，三个输入按钮全部拦截
 
 // 感知实例（boot 时创建；切模型时重建）
-let faceLmVideo = null;
-let faceLmImage = null;
+let activeAdapter = null;
 let activeModelName = "face_landmarker";
+let availableModels = [];
+let videoAbort = null;
+let videoRunId = 0;
+let processing = false;
 
 // 版本：A 面部（当前）；B 全身（二期，按钮置灰）
 const MODE_VIEWS = { a: ["head"], b: ["head", "half", "full"] };
@@ -68,6 +72,55 @@ function showOverlay(text, withRetry) {
   els.overlay.hidden = false;
 }
 
+function setBusy(busy) {
+  els.btnCamera.disabled = busy;
+  els.btnBrowse.disabled = busy;
+  els.btnSecondary.disabled = busy;
+  els.fileInput.disabled = busy;
+  els.modelSelect.disabled = busy || availableModels.length < 2;
+}
+
+async function closeAdapter(adapter) {
+  try {
+    await adapter?.close();
+  } catch {}
+}
+
+async function initAdapter(entry, options) {
+  const adapter = await createAdapter(entry);
+  try {
+    const result = await adapter.init(options);
+    return { adapter, result };
+  } catch (error) {
+    await closeAdapter(adapter);
+    throw error;
+  }
+}
+
+function mediaPipeEntry(models) {
+  return models.find((m) => m.kind === "mediapipe-task" || m.name === "face_landmarker");
+}
+
+async function initDefaultAdapter(manifest, options) {
+  const models = manifest.models || [];
+  const preferred = models.find((m) => m.default) || models[0];
+  if (!preferred) throw new Error("manifest 中没有模型");
+  try {
+    return { entry: preferred, fallback: false, ...(await initAdapter(preferred, options)) };
+  } catch (error) {
+    const fallback = mediaPipeEntry(models);
+    if (!fallback || fallback === preferred) throw error;
+    return { entry: fallback, fallback: true, ...(await initAdapter(fallback, options)) };
+  }
+}
+
+function resetOutputState() {
+  videoFrames = [];
+  mesh.clear();
+  readout.reset();
+  avatar?.resetPose();
+}
+
 function flatLandmarks(lm) {
   if (!lm) return null;
   if (Array.isArray(lm[0])) return lm.flat(); // photo API 时代的嵌套数组
@@ -83,23 +136,38 @@ function flatLandmarks(lm) {
   return lm; // 已是 flat
 }
 
-function applyFrame({ blendshapes, headEuler, landmarks }, { advanceReadout = true } = {}) {
-  const facePresent = !!landmarks;
+function applyFrame(frame, { advanceReadout = true } = {}) {
+  const blendshapes = normalizeBlendshapes(frame.blendshapes);
+  const hasBlendshapes = !!(blendshapes && blendshapes.length > 0);
+  const facePresent = hasOutput(frame);
   if (facePresent) {
     lastFacePresentAt = performance.now();
     els.nofaceBadge.hidden = true;
-    avatar.setBlendshapes(blendshapes);
-    if (headEuler) avatar.setHeadEuler(headEuler);
+    avatar.setBlendshapes(hasBlendshapes ? blendshapes : []);
+    avatar.setHeadEuler(frame.headEuler || { x: 0, y: 0, z: 0 });
     els.renderIdle.hidden = true;
   }
-  mesh.draw(facePresent ? flatLandmarks(landmarks) : null);
-  if (advanceReadout) readout.update(facePresent ? blendshapes : [], {});
+  if (frame.landmarks && activeAdapter?.capabilities?.mesh === true) {
+    mesh.draw(flatLandmarks(frame.landmarks));
+  } else {
+    mesh.clear();
+  }
+  if (advanceReadout) {
+    if (hasBlendshapes) {
+      readout.clearUnavailable();
+      readout.update(blendshapes, {});
+    } else {
+      readout.update([], {});
+      readout.setUnavailable("该模型无表情输出");
+    }
+  }
 }
 
 // 预计算一帧的读数分（视频回放模式用：读数跟随视频进度而非墙钟）
 function buildScores(frame) {
   const scores = {};
-  if (frame.blendshapes) for (const c of frame.blendshapes) scores[c.categoryName] = c.score;
+  const blendshapes = normalizeBlendshapes(frame.blendshapes);
+  if (blendshapes) for (const c of blendshapes) scores[c.categoryName] = c.score;
   return scores;
 }
 
@@ -125,6 +193,11 @@ function enterStage(mode_) {
 function backToLanding() {
   state = "landing";
   camRunning = false;
+  videoAbort?.abort();
+  videoAbort = null;
+  videoRunId++;
+  processing = false;
+  setBusy(false);
   input.stop(); // 会停掉 getUserMedia 的 tracks
   mesh.clear();
   readout.reset();
@@ -176,11 +249,11 @@ async function startCamera() {
 async function cameraLoop() {
   const video = els.sourceVideo;
   while (camRunning && state === "camera") {
-    if (video.readyState >= 2 && faceLmVideo) {
+    if (video.readyState >= 2 && activeAdapter) {
       try {
-        const frame = perception.toFrame(faceLmVideo.detectForVideo(video, performance.now()));
+        const frame = await activeAdapter.infer(video, performance.now());
         frameCount++;
-        if (frame) applyFrame(frame);
+        if (frame && hasOutput(frame)) applyFrame(frame);
         else {
           mesh.clear();
           readout.update([], {}); // 零值推进，轨道不冻结
@@ -204,8 +277,8 @@ async function startPhoto(file) {
   input.setPhoto(file);
   try {
     const bitmap = await createImageBitmap(file);
-    const frame = perception.toFrame(faceLmImage.detect(bitmap));
-    if (!frame) {
+    const frame = await activeAdapter.infer(bitmap, 0);
+    if (!frame || !hasOutput(frame)) {
       setStatus("没有检测到人脸，换一张试试");
       return;
     }
@@ -217,27 +290,102 @@ async function startPhoto(file) {
 }
 
 /* ---------------- video 模式（本地批处理 + 回放读数） ---------------- */
+function waitForMetadata(video, signal) {
+  if (video.readyState >= 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let timer = null;
+
+    const cleanup = () => {
+      video.removeEventListener("loadedmetadata", onLoaded);
+      video.removeEventListener("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+      if (timer) clearTimeout(timer);
+    };
+
+    const onLoaded = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = () => {
+      cleanup();
+      reject(new Error("视频无法读取"));
+    };
+
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+
+    video.addEventListener("loadedmetadata", onLoaded, { once: true });
+    video.addEventListener("error", onError, { once: true });
+
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("视频元数据加载超时"));
+    }, 10000);
+  });
+}
+
 async function startVideo(file) {
   if (!ready) {
     setStatus("推理引擎还在加载，稍候几秒再试…");
     return;
   }
+
+  const runId = ++videoRunId;
+  videoAbort?.abort();
+  const controller = new AbortController();
+  videoAbort = controller;
+  processing = true;
+  setBusy(true);
+
   enterStage("video");
+  videoFrames = [];
   input.setVideo(file);
   const video = els.sourceVideo;
-  await new Promise((r) => video.addEventListener("loadedmetadata", r, { once: true }));
-  setStatus("本地逐帧处理中…");
-  const frames = await perception.processVideo(video, faceLmVideo, (done, total) => {
-    setStatus(`本地逐帧处理中… ${done}/${total}`);
-  });
-  videoFrames = [];
-  for (const item of frames) {
-    if (item.ok && item.blendshapes) {
-      item.scores = buildScores(item);
-      videoFrames.push(item);
+
+  try {
+    await waitForMetadata(video, controller.signal);
+    if (runId !== videoRunId) return;
+
+    setStatus("本地逐帧处理中…");
+    const frames = await processVideo(video, activeAdapter, {
+      strideMs: 66,
+      signal: controller.signal,
+      onProgress: (done, total) => {
+        if (runId === videoRunId) setStatus(`本地逐帧处理中… ${done}/${total}`);
+      },
+    });
+    if (runId !== videoRunId) return;
+
+    videoFrames = [];
+    for (const item of frames) {
+      if (item.ok && hasOutput(item)) {
+        item.scores = buildScores(item);
+        videoFrames.push(item);
+      }
+    }
+    setStatus(`video · 已处理 ${videoFrames.length} 帧 · 播放即同步`);
+  } catch (e) {
+    if (e.name !== "AbortError" && runId === videoRunId) {
+      setStatus(`视频处理失败：${e.message || e}`);
+    }
+  } finally {
+    if (runId === videoRunId) {
+      processing = false;
+      videoAbort = null;
+      setBusy(false);
     }
   }
-  setStatus(`video · 已处理 ${videoFrames.length} 帧 · 播放即同步`);
 }
 
 function onVideoTime() {
@@ -256,44 +404,74 @@ function onVideoTime() {
 }
 
 /* ---------------- 模型下拉（客户端切换；蒸馏 ONNX 二期加入） ---------------- */
-async function refreshModels() {
+async function refreshModels(manifest) {
   try {
-    const manifest = await (await fetch("models/manifest.json", { cache: "no-cache" })).json();
+    const data = manifest || await loadManifest();
+    availableModels = data.models || [];
     els.modelSelect.innerHTML = "";
-    for (const m of manifest.models) {
+    for (const m of availableModels) {
       const opt = document.createElement("option");
       opt.value = m.name;
-      opt.textContent = m.name === "face_landmarker" ? "mediapipe-task" : m.name;
+      opt.textContent = m.label || (m.name === "face_landmarker" ? "mediapipe-task" : m.name);
       opt.selected = m.name === activeModelName;
       els.modelSelect.appendChild(opt);
     }
-    els.modelSelect.disabled = els.modelSelect.options.length < 2;
+    els.modelSelect.disabled = availableModels.length < 2;
   } catch {
     els.modelSelect.innerHTML = "<option>manifest 读取失败</option>";
+    els.modelSelect.disabled = true;
   }
 }
 
 async function onModelChange() {
   const name = els.modelSelect.value;
   if (name === activeModelName) return;
-  els.modelSelect.disabled = true;
+  if (processing) {
+    els.modelSelect.value = activeModelName;
+    setStatus("视频处理中，暂不能切换模型");
+    return;
+  }
+  const entry = availableModels.find((m) => m.name === name);
+  if (!entry) {
+    setStatus(`未找到模型：${name}`);
+    els.modelSelect.value = activeModelName;
+    return;
+  }
+  setBusy(true);
   setStatus(`正在切换模型：${name}…`);
+  let next = null;
   try {
-    const { blob } = await ensureModel(name);
-    const buf = await blobToBuffer(blob);
-    const nv = await perception.createFaceLandmarker(buf, "VIDEO");
-    const ni = await perception.createFaceLandmarker(buf, "IMAGE");
-    faceLmVideo?.close();
-    faceLmImage?.close();
-    faceLmVideo = nv;
-    faceLmImage = ni;
+    const initialized = await initAdapter(entry, {
+      onProgress: (received, total) => {
+        setStatus(`正在切换模型：${name}… ${Math.round(received / 1024)}KB / ${Math.round((total || 0) / 1024)}KB`);
+      },
+    });
+    next = initialized.adapter;
+    await closeAdapter(activeAdapter);
+    activeAdapter = next;
     activeModelName = name;
+    resetOutputState();
     setStatus(`模型已切换：${name}`);
   } catch (e) {
-    setStatus(String(e.message || e));
+    await closeAdapter(next);
+    const fallbackEntry = mediaPipeEntry(availableModels);
+    if (fallbackEntry && fallbackEntry.name !== activeModelName) {
+      try {
+        const fallback = await initAdapter(fallbackEntry);
+        await closeAdapter(activeAdapter);
+        activeAdapter = fallback.adapter;
+        activeModelName = fallback.entry.name;
+        resetOutputState();
+        setStatus(`模型切换失败，已回退 MediaPipe：${e.message || e}`);
+      } catch {
+        setStatus(`模型切换失败：${e.message || e}`);
+      }
+    } else {
+      setStatus(String(e.message || e));
+    }
     els.modelSelect.value = activeModelName;
   } finally {
-    els.modelSelect.disabled = false;
+    setBusy(false);
   }
 }
 
@@ -336,6 +514,13 @@ function bindEvents() {
 }
 
 function routeFile(file) {
+  if (processing) {
+    videoAbort?.abort();
+    videoAbort = null;
+    videoRunId++;
+    processing = false;
+    setBusy(false);
+  }
   if (file.type.startsWith("image/")) startPhoto(file);
   else if (file.type.startsWith("video/")) startVideo(file);
   else setStatus("这不是照片或视频文件");
@@ -386,19 +571,31 @@ async function boot() {
   // 模型就绪：IndexedDB 有缓存则零网络，否则带进度下载
   setStatus("首次加载推理引擎（wasm 约 13MB，仅第一次慢）…");
   try {
-    const { blob, fromCache } = await ensureModel("face_landmarker", (recv, total) => {
-      setStatus(`首次下载模型中… ${Math.round(recv / 1024)}KB / ${Math.round((total || 0) / 1024)}KB`);
+    const manifest = await loadManifest();
+    availableModels = manifest.models || [];
+    const initialized = await initDefaultAdapter(manifest, {
+      onProgress: (received, total) => {
+        setStatus(`首次下载模型中… ${Math.round(received / 1024)}KB / ${Math.round((total || 0) / 1024)}KB`);
+      },
     });
-    const buf = await blobToBuffer(blob);
-    faceLmVideo = await perception.createFaceLandmarker(buf, "VIDEO");
-    faceLmImage = await perception.createFaceLandmarker(buf, "IMAGE");
+    activeAdapter = initialized.adapter;
+    activeModelName = initialized.entry.name;
+    const fromCache = initialized.result?.fromCache;
     ready = true;
-    setStatus(fromCache ? "待机（模型来自本地缓存）" : "待机（模型已更新）");
+    setStatus(
+      initialized.fallback
+        ? "自定义模型初始化失败，已回退 MediaPipe"
+        : fromCache
+          ? "待机（模型来自本地缓存）"
+          : "待机（模型已更新）",
+    );
+    await refreshModels(manifest);
   } catch (e) {
+    await closeAdapter(activeAdapter);
+    activeAdapter = null;
     showOverlay(`模型没加载成功：${e.message || e}`, true);
     return;
   }
-  refreshModels();
   try {
     await avatar.load("assets/three-vrm-girl.vrm");
   } catch (e) {
