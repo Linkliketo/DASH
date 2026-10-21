@@ -550,9 +550,10 @@ export class BenchmarkRunner {
           let ts = Math.round(now);
           if (ts <= lastTs) ts = lastTs + 1;
           lastTs = ts;
-          const result = landmarker.detectForVideo(frameSource, ts);
+          const frame = landmarker.inferVideo
+            ? landmarker.inferVideo(frameSource, ts)
+            : toFrame(landmarker.detectForVideo(frameSource, ts));
           const t1 = performance.now();
-          const frame = toFrame(result);
           if (frame) this.applyFrame?.(frame, { mirror: !!source.cameraUsed });
           const t2 = performance.now();
           const timing = avatar.lastTiming || { rigMs: 0, renderMs: 0 };
