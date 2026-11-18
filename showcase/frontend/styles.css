@@ -560,6 +560,7 @@ a.link-card:hover { transform: rotate(0deg) translateY(-4px); }
 
 /* ---------- 读数条（签名元素：时间轴） ---------- */
 .readout { display: flex; flex-direction: column; gap: 8px; }
+.readout-unavailable { padding: 4px 0; opacity: 0.65; }
 .readout-row {
   display: grid;
   grid-template-columns: 190px 1fr 64px;

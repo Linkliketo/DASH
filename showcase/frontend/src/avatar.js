@@ -2,10 +2,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils, VRMExpression, VRMExpressionMorphTargetBind } from "@pixiv/three-vrm";
-import { Rig } from "./rig.js?v=13";
-import { mapHeadEuler } from "./mirror.js?v=13";
-import { buildProfile, FaceMapper } from "./vrm_face/facemap.mjs?v=13";
-import { buildCustomProfile, CustomFaceMapper, groupBindsByMesh } from "./vrm_face/morphscan.mjs?v=13";
+import { Rig } from "./rig.js?v=14";
+import { mapHeadEuler } from "./mirror.js?v=14";
+import { buildProfile, FaceMapper } from "./vrm_face/facemap.mjs?v=14";
+import { buildCustomProfile, CustomFaceMapper, groupBindsByMesh } from "./vrm_face/morphscan.mjs?v=14";
 
 export class Avatar {
   constructor(canvas) {

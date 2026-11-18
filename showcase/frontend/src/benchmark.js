@@ -1,7 +1,7 @@
 // 性能测试：端到端 FPS / 感知推理 / rig+渲染 / 工作量长尾。
 // 数据源只允许真实媒体（内置隐藏头像 / 本地图片 / 本地视频 / 摄像头），不做合成信号。
 // 判定规则见 benchmark-rules.js：帧间隔受刷新率量化，只作诊断；判定以工作量与吞吐为准。
-import { toFrame } from "./perception.js?v=13";
+import { inferFrame } from "./adapters/infer.js?v=14";
 import {
   TARGET_FPS,
   FRAME_BUDGET_MS,
@@ -9,7 +9,7 @@ import {
   WORK_OVER_BUDGET_WARN_RATIO,
   evaluateVerdict,
   verdictLabel,
-} from "./benchmark-rules.js?v=13";
+} from "./benchmark-rules.js?v=14";
 
 export const BENCH_SCHEMA = "dash.benchmark.v2";
 export { TARGET_FPS, FRAME_BUDGET_MS };
@@ -347,6 +347,10 @@ async function createSource(kind, file, { getActiveCamera, onStatus }) {
 
 /* ---------------- 测试运行器 ---------------- */
 
+export async function fetchBenchmarkFrame(landmarker, frameSource, timestampMs) {
+  return await inferFrame(landmarker, frameSource, timestampMs);
+}
+
 export class BenchmarkAbort extends Error {
   constructor(reason) {
     super(reason || "已中止");
@@ -537,7 +541,7 @@ export class BenchmarkRunner {
         });
       };
 
-      const step = (now) => {
+      const step = async (now) => {
         if (this._abortReason) return reject(new BenchmarkAbort(this._abortReason));
         if (!loopStart) loopStart = now;
         if (lastTick && now - lastTick > 5000) {
@@ -550,10 +554,12 @@ export class BenchmarkRunner {
           let ts = Math.round(now);
           if (ts <= lastTs) ts = lastTs + 1;
           lastTs = ts;
-          const result = landmarker.detectForVideo(frameSource, ts);
+          const frame = await fetchBenchmarkFrame(landmarker, frameSource, ts);
           const t1 = performance.now();
-          const frame = toFrame(result);
-          if (frame) this.applyFrame?.(frame, { mirror: !!source.cameraUsed, snap: !source.cameraUsed });
+          if (frame) this.applyFrame?.(frame, {
+            mirror: !!source.cameraUsed,
+            snap: !source.cameraUsed,
+          });
           const t2 = performance.now();
           const timing = avatar.lastTiming || { rigMs: 0, renderMs: 0 };
           const workMs = t1 - t0 + (t2 - t1) + timing.rigMs + timing.renderMs;
@@ -711,7 +717,7 @@ export function toMarkdown(r) {
     "| --- | --- |",
     ...envRows.map(([k, v]) => `| ${k} | ${String(v).replace(/\|/g, "\\|")} |`),
     "",
-    `> 口径：判定以「平均帧率 + 平均/P95 工作量」为准；帧间隔受显示刷新率量化，仅作调度诊断。感知耗时只统计 detectForVideo；rig+渲染来自渲染循环埋点；工作量 = 感知 + 表情映射 + rig + 渲染，不含测试页的 canvas 重采样。`,
+    `> 口径：判定以「平均帧率 + 平均/P95 工作量」为准；帧间隔受显示刷新率量化，仅作调度诊断。感知耗时只统计 adapter 推理；rig+渲染来自渲染循环埋点；工作量 = 感知 + 表情映射 + rig + 渲染，不含测试页的 canvas 重采样。`,
   ];
   return lines.join("\n");
 }

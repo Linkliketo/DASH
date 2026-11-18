@@ -132,7 +132,24 @@ export class Readout {
     }
   }
 
+  setUnavailable(message) {
+    let el = this.container.querySelector(".readout-unavailable");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "readout-unavailable mono";
+      this.container.prepend(el);
+    }
+    el.textContent = message;
+    el.hidden = false;
+  }
+
+  clearUnavailable() {
+    const el = this.container.querySelector(".readout-unavailable");
+    if (el) el.hidden = true;
+  }
+
   reset() {
+    this.clearUnavailable();
     for (const row of this.rows) {
       row.samples = [];
       row.valueEl.textContent = "0.00";

@@ -3,7 +3,7 @@
 //   { blendshapes: [{categoryName, score}], landmarks: [{x,y,z}×478], headEuler: {x,y,z} }
 // headEuler 来自 Tasks JS 的 facialTransformationMatrixes（4x4 变换矩阵），
 // 比服务端的 solvePnP 近似更准。
-import { FaceLandmarker, FilesetResolver } from "../vendor/vision/vision_bundle.mjs?v=13";
+import { FaceLandmarker, FilesetResolver } from "../vendor/vision/vision_bundle.mjs?v=14";
 
 let _fileset = null;
 
@@ -38,35 +38,14 @@ function eulerFromMatrix(data) {
 }
 
 // Tasks JS 结果 → 前端通用帧格式；无人脸返回 null
-export function toFrame(result) {
+// aspect 用于 GNM 等依赖图像宽高比的 backend；MediaPipe adapter 会从输入媒体计算。
+export function toFrame(result, aspect = null) {
   const face = result?.faceLandmarks?.[0];
   if (!face) return null;
   return {
     blendshapes: result.faceBlendshapes?.[0]?.categories ?? null,
     landmarks: face,
     headEuler: eulerFromMatrix(result.facialTransformationMatrixes?.[0]?.data),
+    aspect: Number.isFinite(aspect) && aspect > 0 ? aspect : null,
   };
-}
-
-// 视频逐帧批处理：拖动 playhead 逐点采样。stride 为采样间隔毫秒（默认 15 FPS）。
-export async function processVideo(video, landmarker, onProgress, strideMs = 66) {
-  const frames = [];
-  const durationMs = video.duration * 1000;
-  const total = Math.ceil(durationMs / strideMs);
-  video.pause();
-  const seeked = () => new Promise((r) => video.addEventListener("seeked", r, { once: true }));
-  for (let t = 0, i = 0; t < durationMs; t += strideMs, i++) {
-    video.currentTime = t / 1000;
-    await seeked();
-    const frame = toFrame(landmarker.detectForVideo(video, Math.round(t)));
-    const item = { frame: i, timestampMs: Math.round(t), ok: !!frame };
-    if (frame) {
-      item.blendshapes = frame.blendshapes;
-      item.landmarks = frame.landmarks;
-      item.headEuler = frame.headEuler;
-    }
-    frames.push(item);
-    if (onProgress) onProgress(frames.length, total);
-  }
-  return frames;
 }
