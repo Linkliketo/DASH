@@ -1,7 +1,6 @@
 // 性能测试：端到端 FPS / 感知推理 / rig+渲染 / 工作量长尾。
 // 数据源只允许真实媒体（内置隐藏头像 / 本地图片 / 本地视频 / 摄像头），不做合成信号。
 // 判定规则见 benchmark-rules.js：帧间隔受刷新率量化，只作诊断；判定以工作量与吞吐为准。
-import { toFrame } from "./perception.js?v=13";
 import {
   TARGET_FPS,
   FRAME_BUDGET_MS,
@@ -9,7 +8,7 @@ import {
   WORK_OVER_BUDGET_WARN_RATIO,
   evaluateVerdict,
   verdictLabel,
-} from "./benchmark-rules.js?v=13";
+} from "./benchmark-rules.js?v=26";
 
 export const BENCH_SCHEMA = "dash.benchmark.v2";
 export { TARGET_FPS, FRAME_BUDGET_MS };
@@ -144,18 +143,24 @@ function loadImage(url) {
   });
 }
 
-function waitEvent(target, event, timeoutMs = 20000) {
+function waitEvent(target, event, timeoutMs = 20000, signal) {
   return new Promise((resolve, reject) => {
     let timer = null;
     const on = (e) => {
       cleanup();
       resolve(e);
     };
+    const onAbort = () => {
+      cleanup();
+      reject(collectAbortError());
+    };
     const cleanup = () => {
       target.removeEventListener(event, on);
+      signal?.removeEventListener("abort", onAbort);
       if (timer) clearTimeout(timer);
     };
     target.addEventListener(event, on, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => {
       cleanup();
       reject(new Error(`等待 ${event} 超时`));
@@ -188,7 +193,7 @@ function coverRect(sw, sh, dw, dh) {
   };
 }
 
-async function createSource(kind, file, { getActiveCamera, onStatus }) {
+async function createSource(kind, file, { getActiveCamera, onStatus, srcUrl, videoEl, signal } = {}) {
   const canvas = document.createElement("canvas");
   canvas.width = PROCESS_W;
   canvas.height = PROCESS_H;
@@ -207,7 +212,10 @@ async function createSource(kind, file, { getActiveCamera, onStatus }) {
     captureFps: null,
     cameraUsed: kind === "camera",
     faceExpected: true,
+    durationS: null,
     draw: null,
+    reset: null,
+    videoTimeMs: null,
     startCaptureCounter: () => null,
     cleanup: () => {},
   };
@@ -278,15 +286,48 @@ async function createSource(kind, file, { getActiveCamera, onStatus }) {
     } else {
       if (!file) throw new Error("请先选择一段视频");
       revoke = URL.createObjectURL(file);
-      video = document.createElement("video");
+      video = videoEl || document.createElement("video");
       video.muted = true;
       video.loop = true;
       video.playsInline = true;
       video.preload = "auto";
-      video.src = revoke;
-      await waitEvent(video, "loadedmetadata");
-      await video.play();
-      await waitFirstVideoFrame(video);
+      if (!videoEl) {
+        // 没有可见 preview 时，离屏但仍在 DOM 中
+        video.style.cssText = "position:fixed;left:0;top:0;width:640px;height:360px;opacity:0.01;pointer-events:none;z-index:-1;";
+        document.body.appendChild(video);
+      }
+      const onAbort = () => {
+        try {
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+        } catch {}
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        video.src = srcUrl || revoke;
+        await waitEvent(video, "loadedmetadata", 20000, signal);
+        if (signal?.aborted) throw collectAbortError();
+        await video.play();
+        try {
+          await waitEvent(video, "loadeddata", 3000, signal);
+        } catch (e) {
+          if (signal?.aborted) throw collectAbortError();
+        }
+        if (!video.videoWidth || video.readyState < 2) {
+          await new Promise((resolve, reject) => {
+            const started = performance.now();
+            const check = () => {
+              if (signal?.aborted) return reject(collectAbortError());
+              if ((video.videoWidth && video.readyState >= 2) || performance.now() - started > 10000) resolve();
+              else setTimeout(check, 1000);
+            };
+            check();
+          });
+        }
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+      }
     }
 
     const startupMs = performance.now() - t0;
@@ -305,7 +346,18 @@ async function createSource(kind, file, { getActiveCamera, onStatus }) {
       loadMs: kind === "camera" ? null : round(startupMs),
       startupMs: round(startupMs),
       nominalFps,
+      durationS: kind === "camera" ? null : (Number.isFinite(video.duration) ? video.duration : null),
       faceExpected: true,
+      reset: kind === "camera" ? null : async () => {
+        video.pause();
+        video.currentTime = 0;
+        try {
+          await waitEvent(video, "seeked", 500);
+        } catch {}
+        await video.play();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      },
+      videoTimeMs: () => video.currentTime * 1000,
       draw() {
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, PROCESS_W, PROCESS_H);
@@ -337,6 +389,7 @@ async function createSource(kind, file, { getActiveCamera, onStatus }) {
       },
       cleanup() {
         if (ownStream) for (const track of ownStream.getTracks()) track.stop();
+        if (kind === "local-video" && !videoEl) video.remove();
         if (revoke) URL.revokeObjectURL(revoke);
       },
     };
@@ -355,11 +408,14 @@ export class BenchmarkAbort extends Error {
 }
 
 export class BenchmarkRunner {
-  constructor({ getLandmarker, applyFrame, ensureAvatar, getAvatar }) {
+  constructor({ getLandmarker, applyFrame, ensureAvatar, getAvatar, getDetect, getVariant, getRuntime }) {
     this.getLandmarker = getLandmarker;
     this.applyFrame = applyFrame;
     this.ensureAvatar = ensureAvatar;
     this.getAvatar = getAvatar;
+    this.getDetect = getDetect;
+    this.getVariant = getVariant;
+    this.getRuntime = getRuntime;
     this._abortReason = null;
     this._running = false;
     this._onVisibility = () => {
@@ -382,12 +438,16 @@ export class BenchmarkRunner {
     try {
       const landmarker = this.getLandmarker();
       if (!landmarker) throw new Error("推理引擎未就绪，请等状态栏显示「待机」");
+      const detect = this.getDetect?.();
+      if (!detect) throw new Error("感知变体未就绪");
+      const variant = this.getVariant?.() || null;
+      const runtime = this.getRuntime?.() || null;
       const avatar = this.getAvatar();
-      if (!avatar) throw new Error("皮套人渲染器未就绪");
+      if (!avatar) throw new Error("数字虚拟人渲染器未就绪");
 
-      onStatus?.("加载皮套人…");
+      onStatus?.("加载数字虚拟人…");
       const avatarOk = await this.ensureAvatar();
-      if (!avatarOk) throw new Error("皮套人加载失败，无法开始测试");
+      if (!avatarOk) throw new Error("数字虚拟人加载失败，无法开始测试");
       const avatarLoadMs = performance.now() - tSetup;
       if (this._abortReason) throw new BenchmarkAbort(this._abortReason);
 
@@ -403,8 +463,8 @@ export class BenchmarkRunner {
 
       onStatus?.("预热中（首帧不计入统计）…");
       const result = await this._loop({
-        landmarker, avatar, source, durationMode, targetMs, targetFrames,
-        warmupMs, getInfo, avatarLoadMs, onLive,
+        landmarker, detect, variant, runtime, avatar, source,
+        durationMode, targetMs, targetFrames, warmupMs, getInfo, avatarLoadMs, onLive,
       });
 
       return result;
@@ -416,11 +476,13 @@ export class BenchmarkRunner {
     }
   }
 
-  _loop({ landmarker, avatar, source, durationMode, targetMs, targetFrames, warmupMs, getInfo, avatarLoadMs, onLive }) {
+  _loop({ landmarker, detect, variant, runtime, avatar, source, durationMode, targetMs, targetFrames, warmupMs, getInfo, avatarLoadMs, onLive }) {
     return new Promise((resolve, reject) => {
       const refreshPromise = measureRefreshHz();
       const intervals = [];
       const perception = [];
+      const onnx = [];
+      const mapping = [];
       const applyTimes = [];
       const rigTimes = [];
       const renderTimes = [];
@@ -453,6 +515,8 @@ export class BenchmarkRunner {
 
         const frameStats = summarize(intervals);
         const perceptionStats = summarize(perception);
+        const onnxStats = summarize(onnx);
+        const mappingStats = summarize(mapping);
         const applyStats = summarize(applyTimes);
         const rigStats = summarize(rigTimes);
         const renderStats = summarize(renderTimes);
@@ -478,6 +542,13 @@ export class BenchmarkRunner {
           generatedAt: new Date().toISOString(),
           generatedAtLocal: nowStamp(),
           config: {
+            perceptionVariant: variant?.key || "mp_full",
+            variantLabel: variant?.label || "MediaPipe Full",
+            blendshapeSource: variant?.blendshapeSource || "mediapipe",
+            modelSha256: runtime?.sha256 || variant?.modelSha256 || "",
+            mediapipeBlendshapesEnabled: variant?.mediapipeBlendshapes !== false,
+            ortProvider: runtime?.provider || variant?.ortProvider || "",
+            modelLoadMs: runtime?.modelLoadMs ?? 0,
             mode: durationMode ? "duration" : "frames",
             targetDurationMs: durationMode ? targetMs : null,
             targetFrames: durationMode ? null : targetFrames,
@@ -519,6 +590,8 @@ export class BenchmarkRunner {
             p95CapacityFps: round(p95CapacityFps),
             frameMs: frameStats,
             perceptionMs: perceptionStats,
+            onnxMs: onnxStats,
+            mappingMs: mappingStats,
             applyMs: applyStats,
             rigRenderMs: {
               rig: rigStats,
@@ -537,7 +610,7 @@ export class BenchmarkRunner {
         });
       };
 
-      const step = (now) => {
+      const step = async (now) => {
         if (this._abortReason) return reject(new BenchmarkAbort(this._abortReason));
         if (!loopStart) loopStart = now;
         if (lastTick && now - lastTick > 5000) {
@@ -546,17 +619,21 @@ export class BenchmarkRunner {
 
         try {
           const frameSource = source.draw(now);
-          const t0 = performance.now();
           let ts = Math.round(now);
           if (ts <= lastTs) ts = lastTs + 1;
           lastTs = ts;
-          const result = landmarker.detectForVideo(frameSource, ts);
+          const t0 = performance.now();
+          const got = await detect(frameSource, "video", ts);
           const t1 = performance.now();
-          const frame = toFrame(result);
+          const frame = got.frame;
+          const perceptionMs = got.perceptionMs ?? Math.max(0, t1 - t0 - (got.onnxMs || 0));
+          const onnxMs = got.onnxMs || 0;
+          if (this._abortReason) throw new BenchmarkAbort(this._abortReason);
           if (frame) this.applyFrame?.(frame, { mirror: !!source.cameraUsed, snap: !source.cameraUsed });
           const t2 = performance.now();
+          const mappingMs = avatar.lastMappingMs || 0;
           const timing = avatar.lastTiming || { rigMs: 0, renderMs: 0 };
-          const workMs = t1 - t0 + (t2 - t1) + timing.rigMs + timing.renderMs;
+          const workMs = perceptionMs + onnxMs + mappingMs + timing.rigMs + timing.renderMs;
 
           if (warmupDone) {
             if (!measureStarted) {
@@ -574,7 +651,9 @@ export class BenchmarkRunner {
             intervals.push(interval);
             if (interval > FRAME_BUDGET_MS) frameOverBudget++;
             if (workMs > FRAME_BUDGET_MS) workOverBudget++;
-            perception.push(t1 - t0);
+            perception.push(perceptionMs);
+            onnx.push(onnxMs);
+            mapping.push(mappingMs);
             applyTimes.push(t2 - t1);
             rigTimes.push(timing.rigMs);
             renderTimes.push(timing.renderMs);
@@ -603,6 +682,8 @@ export class BenchmarkRunner {
                 : 0,
               fps,
               perceptionMs: perception.length ? perception[perception.length - 1] : null,
+              onnxMs: onnx.length ? onnx[onnx.length - 1] : null,
+              mappingMs,
               rigRenderMs: timing.rigMs + timing.renderMs,
             });
           }
@@ -660,7 +741,9 @@ export function toMarkdown(r) {
     ["帧间隔 P95（调度诊断）", fmt(r.metrics.frameMs.p95, "ms"), "—", "—"],
     ["调度间隔超预算占比", fmt(r.metrics.frameIntervalOverBudgetRatio == null ? null : round(r.metrics.frameIntervalOverBudgetRatio * 100), "%"), "诊断项", "—"],
     ["可持续帧率（均值 / P95 工作量）", `${fmt(r.metrics.capacityFps, "FPS")} / ${fmt(r.metrics.p95CapacityFps, "FPS")}`, "—", "—"],
-    ["感知推理 均值 / P95", `${fmt(r.metrics.perceptionMs.mean, "ms")} / ${fmt(r.metrics.perceptionMs.p95, "ms")}`, "—", "—"],
+    ["感知推理（MediaPipe）均值 / P95", `${fmt(r.metrics.perceptionMs.mean, "ms")} / ${fmt(r.metrics.perceptionMs.p95, "ms")}`, "—", "—"],
+    ["ONNX 52 维回归 均值 / P95", `${fmt(r.metrics.onnxMs?.mean, "ms")} / ${fmt(r.metrics.onnxMs?.p95, "ms")}`, "—", "—"],
+    ["VRM 映射 均值 / P95", `${fmt(r.metrics.mappingMs?.mean, "ms")} / ${fmt(r.metrics.mappingMs?.p95, "ms")}`, "—", "—"],
     ["rig+渲染 均值 / P95", `${fmt(r.metrics.rigRenderMs.rig.mean, "ms")} + ${fmt(r.metrics.rigRenderMs.render.mean, "ms")} / ${fmt(r.metrics.rigRenderMs.total.p95, "ms")}`, "—", "—"],
     ["流水线工作量 均值 / P95", `${fmt(r.metrics.pipelineMs.mean, "ms")} / ${fmt(r.metrics.pipelineMs.p95, "ms")}`, "—", "—"],
     ["统计帧数 / 时长", `${r.metrics.frames} 帧 / ${(r.metrics.elapsedMs / 1000).toFixed(1)} s`, "—", "—"],
@@ -681,7 +764,12 @@ export function toMarkdown(r) {
     ["摄像头调用", src.cameraUsed ? "已调用" : "未调用"],
     ["图像上传", "否（全程本地处理）"],
     ["感知模型", `${env.model?.name || "—"} ${env.model?.version || ""}`.trim()],
-    ["皮套人", `${env.avatar?.name || "—"} ${env.avatar?.version || ""}`.trim()],
+    ["感知变体", `${r.config.perceptionVariant || "mp_full"} / ${r.config.variantLabel || "MediaPipe Full"}`],
+    ["52 维来源", r.config.blendshapeSource || "mediapipe"],
+    ["MediaPipe blendshapes", r.config.mediapipeBlendshapesEnabled ? "开启" : "关闭"],
+    ["ONNX 模型 SHA-256", r.config.modelSha256 || "—"],
+    ["ONNX provider / 模型加载", `${r.config.ortProvider || "—"} / ${fmt(r.config.modelLoadMs, "ms")}`],
+    ["数字虚拟人", `${env.avatar?.name || "—"} ${env.avatar?.version || ""}`.trim()],
   ];
 
   const verdictText = verdictLabel(r.verdict.level);
@@ -711,7 +799,7 @@ export function toMarkdown(r) {
     "| --- | --- |",
     ...envRows.map(([k, v]) => `| ${k} | ${String(v).replace(/\|/g, "\\|")} |`),
     "",
-    `> 口径：判定以「平均帧率 + 平均/P95 工作量」为准；帧间隔受显示刷新率量化，仅作调度诊断。感知耗时只统计 detectForVideo；rig+渲染来自渲染循环埋点；工作量 = 感知 + 表情映射 + rig + 渲染，不含测试页的 canvas 重采样。`,
+    `> 口径：判定以「平均帧率 + 平均/P95 工作量」为准；帧间隔受显示刷新率量化，仅作调度诊断。感知耗时为 MediaPipe detectForVideo；ONNX 为 52 维回归；rig+渲染来自渲染循环埋点；工作量 = 感知 + ONNX + 表情映射 + rig + 渲染，不含测试页的 canvas 重采样。mapping_ms 是 VRM 映射耗时，不是 ONNX 延迟。`,
   ];
   return lines.join("\n");
 }
@@ -752,6 +840,10 @@ export function toCsv(r) {
     ["metrics", "frameIntervalOverBudgetRatio", m.frameIntervalOverBudgetRatio, "ratio", "", ""],
     ["metrics", "perceptionMean", m.perceptionMs.mean, "ms", "", ""],
     ["metrics", "perceptionP95", m.perceptionMs.p95, "ms", "", ""],
+    ["metrics", "onnxMean", m.onnxMs?.mean, "ms", "", ""],
+    ["metrics", "onnxP95", m.onnxMs?.p95, "ms", "", ""],
+    ["metrics", "mappingMean", m.mappingMs?.mean, "ms", "", ""],
+    ["metrics", "mappingP95", m.mappingMs?.p95, "ms", "", ""],
     ["metrics", "rigMean", m.rigRenderMs.rig.mean, "ms", "", ""],
     ["metrics", "renderMean", m.rigRenderMs.render.mean, "ms", "", ""],
     ["metrics", "rigRenderP95", m.rigRenderMs.total.p95, "ms", "", ""],
@@ -759,6 +851,12 @@ export function toCsv(r) {
   rows.push(...metricRows);
   const s = r.source;
   rows.push(
+    ["config", "perceptionVariant", r.config.perceptionVariant, "", "", ""],
+    ["config", "blendshapeSource", r.config.blendshapeSource, "", "", ""],
+    ["config", "modelSha256", r.config.modelSha256, "", "", ""],
+    ["config", "mediapipeBlendshapesEnabled", r.config.mediapipeBlendshapesEnabled, "", "", ""],
+    ["config", "ortProvider", r.config.ortProvider, "", "", ""],
+    ["config", "modelLoadMs", r.config.modelLoadMs, "ms", "", ""],
     ["source", "kind", s.kind, "", "", ""],
     ["source", "label", s.label, "", "", ""],
     ["source", "cameraUsed", s.cameraUsed, "", "", ""],
@@ -785,13 +883,13 @@ export function toCsv(r) {
 }
 
 export function resultFilename(r, ext) {
-  return `dash-benchmark-${fileStamp()}.${ext}`;
+  return `dash-benchmark-${r.config?.perceptionVariant || "mp_full"}-${fileStamp()}.${ext}`;
 }
 
 /* ---------------- 面板（DOM 绑定 + 导出） ---------------- */
 
-function download(name, text, type) {
-  const blob = new Blob([text], { type });
+function download(name, content, type) {
+  const blob = content instanceof Blob ? content : new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -826,7 +924,7 @@ async function copyText(text) {
 
 export function createBenchmarkPanel({
   ensureAvatar, applyFrame, getLandmarker, getAvatar, getInfo, getActiveCamera,
-  onStart, onEnd,
+  getDetect, getVariant, getRuntime, onStart, onEnd,
 }) {
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -856,7 +954,10 @@ export function createBenchmarkPanel({
   let busy = false;
   let pendingFile = null;
   let lastResult = null;
-  const runner = new BenchmarkRunner({ getLandmarker, applyFrame, ensureAvatar, getAvatar });
+  const runner = new BenchmarkRunner({
+    getLandmarker, applyFrame, ensureAvatar, getAvatar,
+    getDetect, getVariant, getRuntime,
+  });
 
   function setStatus(text, kind = "") {
     els.status.textContent = text;
@@ -885,6 +986,18 @@ export function createBenchmarkPanel({
     els.start.disabled = busy || !ready;
   }
 
+  function syncQuickTime() {
+    const time = $("bench-quick-time");
+    if (!time) return;
+    const duration = els.mode.value === "duration";
+    const value = Number(els.value.value) || (duration ? 30 : 300);
+    const variant = getVariant?.();
+    const suffix = variant && variant.key !== "mp_full" ? ` · ${variant.label}` : "";
+    time.textContent = duration
+      ? `快速测试${suffix}：约 ${Math.max(1, Math.round(value))} 秒（含前 1 s 预热）`
+      : `快速测试${suffix}：约 ${Math.max(1, Math.round(value / 30 + 1))} 秒（按 30 FPS 估算，含预热）`;
+  }
+
   function syncModeUi() {
     const duration = els.mode.value === "duration";
     els.unit.textContent = duration ? "s" : "帧";
@@ -892,6 +1005,7 @@ export function createBenchmarkPanel({
     els.value.max = duration ? "600" : "3000";
     els.value.value = duration ? "30" : "300";
     els.start.disabled = busy || !ready;
+    syncQuickTime();
   }
 
   function setBusy(on) {
@@ -982,18 +1096,23 @@ export function createBenchmarkPanel({
       ["工作量超预算帧", `${r.metrics.workOverBudgetFrames} 帧（${fmt(r.metrics.workOverBudgetRatio == null ? null : round(r.metrics.workOverBudgetRatio * 100), "%")}）`],
       ["调度间隔 均值 / P50 / P95 / P99", `${fmt(r.metrics.frameMs.mean)} / ${fmt(r.metrics.frameMs.p50)} / ${fmt(r.metrics.frameMs.p95)} / ${fmt(r.metrics.frameMs.p99)} ms`],
       ["调度间隔超预算帧", `${r.metrics.frameIntervalOverBudgetFrames} 帧（${fmt(r.metrics.frameIntervalOverBudgetRatio == null ? null : round(r.metrics.frameIntervalOverBudgetRatio * 100), "%")}）`],
-      ["感知推理 均值 / P95 / 最大", `${fmt(r.metrics.perceptionMs.mean)} / ${fmt(r.metrics.perceptionMs.p95)} / ${fmt(r.metrics.perceptionMs.max)} ms`],
+      ["感知推理（MediaPipe）均值 / P95 / 最大", `${fmt(r.metrics.perceptionMs.mean)} / ${fmt(r.metrics.perceptionMs.p95)} / ${fmt(r.metrics.perceptionMs.max)} ms`],
+      ["ONNX 52 维回归 均值 / P95", `${fmt(r.metrics.onnxMs?.mean)} / ${fmt(r.metrics.onnxMs?.p95)} ms`],
+      ["VRM 映射 均值 / P95", `${fmt(r.metrics.mappingMs?.mean)} / ${fmt(r.metrics.mappingMs?.p95)} ms`],
       ["rig 均值 / 渲染均值", `${fmt(r.metrics.rigRenderMs.rig.mean)} / ${fmt(r.metrics.rigRenderMs.render.mean)} ms`],
       ["统计帧数 / 时长", `${r.metrics.frames} / ${(r.metrics.elapsedMs / 1000).toFixed(1)} s`],
       ["摄像头 / 图像上传", `${r.source.cameraUsed ? "已调用" : "未调用"} / 否`],
-      ["皮套人加载", `${fmt(r.setup.avatarLoadMs, "ms")}`],
+      ["数字虚拟人加载", `${fmt(r.setup.avatarLoadMs, "ms")}`],
       ["UA", r.environment.userAgent],
       ["CPU 核数 / DPR", `${r.environment.hardwareConcurrency ?? "—"} / ${r.environment.devicePixelRatio ?? "—"}`],
       ["屏幕 / 视口", `${r.environment.screen} / ${r.environment.viewport}`],
       ["WebGL renderer", r.environment.webglRenderer || "—"],
       ["WASM SIMD", r.environment.wasmSimd ? "支持" : "不支持"],
       ["显示刷新率（估计）", r.environment.refreshHz ? `${r.environment.refreshHz} Hz` : "—"],
-      ["感知模型 / 皮套人", `${r.environment.model?.name || "—"} ${r.environment.model?.version || ""} / ${r.environment.avatar?.name || "—"} ${r.environment.avatar?.version || ""}`],
+      ["感知变体", `${r.config.perceptionVariant} / ${r.config.variantLabel}`],
+      ["52 维来源 / MediaPipe blendshapes", `${r.config.blendshapeSource} / ${r.config.mediapipeBlendshapesEnabled ? "开启" : "关闭"}`],
+      ["ONNX SHA-256 / provider / 加载", `${r.config.modelSha256 || "—"} / ${r.config.ortProvider || "—"} / ${fmt(r.config.modelLoadMs, "ms")}`],
+      ["感知模型 / 数字虚拟人", `${r.environment.model?.name || "—"} ${r.environment.model?.version || ""} / ${r.environment.avatar?.name || "—"} ${r.environment.avatar?.version || ""}`],
       ["生成时间", r.generatedAtLocal],
     ]));
     els.result.appendChild(detail);
@@ -1098,6 +1217,7 @@ export function createBenchmarkPanel({
     if (pendingFile) setStatus(`已选择：${pendingFile.name}`);
   });
   els.mode.addEventListener("change", syncModeUi);
+  els.value.addEventListener("input", syncQuickTime);
   els.start.addEventListener("click", start);
   els.abort.addEventListener("click", () => {
     runner.abort("用户中止");
@@ -1115,5 +1235,751 @@ export function createBenchmarkPanel({
       if (ready && !lastResult) setStatus("默认 30 s；丢弃前 1 s 预热；后台标签页会中止测试。");
     },
     abort: () => runner.abort("用户中止"),
+  };
+}
+
+/* ================= 持续负载采集模式（?bench=collect） ================= */
+
+export const COLLECT_SCHEMA = "dash.benchmark.collect.v2";
+export const COLLECT_HEADER =
+  "run_id,device_id,repeat_index,cache_state,timestamp_ms,video_time_ms,frame_index," +
+  "perception_ms,onnx_ms,mapping_ms,rig_ms,render_ms,work_ms,frame_interval_ms," +
+  "face_detected,over_budget_work,over_budget_interval,visibility_state," +
+  "perception_variant,blendshape_source,model_sha256,mediapipe_blendshapes_enabled," +
+  "avatar_backend,gnm_state,gnm_fallback,gnm_load_ms,gnm_identity_fit_ms," +
+  "gnm_solve_ms,gnm_forward_ms,gnm_render_ms,gnm_frame_ms";
+
+const COLLECT_VIDEO_URL = "assets/bench/single-face-30fps.mp4";
+const COLLECT_REPEATS = 10;
+
+function approxCollectLabel(seconds) {
+  const total = Math.max(1, Number(seconds) || 30) * COLLECT_REPEATS + 10;
+  if (total < 60) return `约 ${Math.max(1, Math.round(total))} 秒`;
+  return `约 ${Math.max(1, Math.round(total / 60))} 分钟`;
+}
+
+function approxRemainingLabel(seconds) {
+  const left = Math.max(1, Number(seconds) || 0);
+  if (left >= 60) return `约剩 ${Math.ceil(left / 60)} 分钟`;
+  return `约剩 ${Math.ceil(left)} 秒`;
+}
+
+const COLLECT_ZIP_CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function collectZipCrc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = (crc >>> 8) ^ COLLECT_ZIP_CRC_TABLE[(crc ^ bytes[i]) & 0xFF];
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function collectZipDate(now = new Date()) {
+  const time = ((now.getHours() & 0x1f) << 11) |
+    ((now.getMinutes() & 0x3f) << 5) |
+    (Math.floor(now.getSeconds() / 2) & 0x1f);
+  const date = (((now.getFullYear() - 1980) & 0x7f) << 9) |
+    (((now.getMonth() + 1) & 0x0f) << 5) |
+    (now.getDate() & 0x1f);
+  return { time, date };
+}
+
+function makeCollectZip(files) {
+  const encoder = new TextEncoder();
+  const { time, date } = collectZipDate();
+  const entries = files.map((file) => {
+    const nameBytes = encoder.encode(file.name);
+    const bytes = typeof file.data === "string" ? encoder.encode(file.data) : file.data;
+    return { nameBytes, bytes, crc: collectZipCrc32(bytes), offset: 0 };
+  });
+  const localParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    entry.offset = offset;
+    const header = new Uint8Array(30 + entry.nameBytes.length);
+    const dv = new DataView(header.buffer);
+    dv.setUint32(0, 0x04034b50, true);
+    dv.setUint16(4, 20, true);
+    dv.setUint16(6, 0x0800, true);
+    dv.setUint16(8, 0, true);
+    dv.setUint16(10, time, true);
+    dv.setUint16(12, date, true);
+    dv.setUint32(14, entry.crc, true);
+    dv.setUint32(18, entry.bytes.length, true);
+    dv.setUint32(22, entry.bytes.length, true);
+    dv.setUint16(26, entry.nameBytes.length, true);
+    dv.setUint16(28, 0, true);
+    header.set(entry.nameBytes, 30);
+    localParts.push(header, entry.bytes);
+    offset += header.length + entry.bytes.length;
+  }
+  const centralParts = [];
+  let centralSize = 0;
+  for (const entry of entries) {
+    const header = new Uint8Array(46 + entry.nameBytes.length);
+    const dv = new DataView(header.buffer);
+    dv.setUint32(0, 0x02014b50, true);
+    dv.setUint16(4, 20, true);
+    dv.setUint16(6, 20, true);
+    dv.setUint16(8, 0x0800, true);
+    dv.setUint16(10, 0, true);
+    dv.setUint16(12, time, true);
+    dv.setUint16(14, date, true);
+    dv.setUint32(16, entry.crc, true);
+    dv.setUint32(20, entry.bytes.length, true);
+    dv.setUint32(24, entry.bytes.length, true);
+    dv.setUint16(28, entry.nameBytes.length, true);
+    dv.setUint16(30, 0, true);
+    dv.setUint16(32, 0, true);
+    dv.setUint16(34, 0, true);
+    dv.setUint16(36, 0, true);
+    dv.setUint32(38, 0, true);
+    dv.setUint32(42, entry.offset, true);
+    header.set(entry.nameBytes, 46);
+    centralParts.push(header);
+    centralSize += header.length;
+  }
+  const eocd = new Uint8Array(22);
+  const dv = new DataView(eocd.buffer);
+  dv.setUint32(0, 0x06054b50, true);
+  dv.setUint16(4, 0, true);
+  dv.setUint16(6, 0, true);
+  dv.setUint16(8, entries.length, true);
+  dv.setUint16(10, entries.length, true);
+  dv.setUint32(12, centralSize, true);
+  dv.setUint32(16, offset, true);
+  dv.setUint16(20, 0, true);
+  return new Blob([...localParts, ...centralParts, eocd], { type: "application/zip" });
+}
+
+function r3(v) {
+  return (round(Number(v), 3) ?? 0);
+}
+
+function getCollectDeviceId() {
+  const key = "dash.collect.deviceId";
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved) return saved;
+    const id = crypto.randomUUID?.() || `dev-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem(key, id);
+    return id;
+  } catch {
+    return `dev-${Date.now()}`;
+  }
+}
+
+async function sha256Hex(buffer) {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+function collectStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function collectRow(runId, deviceId, repeatIndex, cacheState, row) {
+  return [
+    runId,
+    deviceId,
+    repeatIndex,
+    cacheState,
+    row.timestamp_ms,
+    row.video_time_ms,
+    row.frame_index,
+    r3(row.perception_ms),
+    r3(row.onnx_ms),
+    r3(row.mapping_ms),
+    r3(row.rig_ms),
+    r3(row.render_ms),
+    r3(row.work_ms),
+    r3(row.frame_interval_ms),
+    row.face_detected ? 1 : 0,
+    row.over_budget_work ? 1 : 0,
+    row.over_budget_interval ? 1 : 0,
+    row.visibility_state,
+    row.perception_variant,
+    row.blendshape_source,
+    row.model_sha256 || "",
+    row.mediapipe_blendshapes_enabled ? 1 : 0,
+    row.avatar_backend || "vrm",
+    row.gnm_state || "",
+    row.gnm_fallback ? 1 : 0,
+    r3(row.gnm_load_ms),
+    r3(row.gnm_identity_fit_ms),
+    r3(row.gnm_solve_ms),
+    r3(row.gnm_forward_ms),
+    r3(row.gnm_render_ms),
+    r3(row.gnm_frame_ms),
+  ].join(",");
+}
+
+function buildCollectCsv(rows) {
+  return [COLLECT_HEADER, ...rows].join("\n");
+}
+
+function buildCollectMeta({
+  deviceId, deviceLabel, coldConfirmed, seconds, analysisWindowMs, input, source,
+  runSummaries, refreshHz, info, frontendVersion, variant, runtime, avatarBackend, gnm,
+}) {
+  const env = collectEnvironment({
+    model: info?.model,
+    avatar: info?.avatar,
+    refreshHz,
+  });
+  const validRuns = runSummaries.filter((r) => r.valid);
+  const averageFps = validRuns.length
+    ? validRuns.reduce((sum, r) => sum + r.fps, 0) / validRuns.length
+    : 0;
+  return {
+    schema: COLLECT_SCHEMA,
+    collected_at: new Date().toISOString(),
+    device_id: deviceId,
+    device_label: deviceLabel || "",
+    ua: env.userAgent,
+    platform: env.platform,
+    hardware_concurrency: env.hardwareConcurrency,
+    device_memory_gb: navigator.deviceMemory ?? null,
+    gpu_renderer: env.webglRenderer,
+    wasm_simd: env.wasmSimd,
+    screen: env.screen,
+    viewport: env.viewport,
+    dpr: env.devicePixelRatio,
+    refresh_hz: env.refreshHz,
+    input: {
+      path: COLLECT_VIDEO_URL,
+      sha256: input.sha256,
+      duration_s: source.durationS,
+      width: source.width,
+      height: source.height,
+      fps: 30,
+    },
+    avatar: {
+      name: info?.avatar?.name || "vrm-girl",
+      version: info?.avatar?.version || "1.0.0",
+    },
+    perception_model: info?.model
+      ? `${info.model.name} ${info.model.version}`
+      : "face_landmarker 1.0.0",
+    perception_variant: variant?.key || "mp_full",
+    variant_label: variant?.label || "MediaPipe Full",
+    blendshape_source: variant?.blendshapeSource || "mediapipe",
+    model_sha256: runtime?.sha256 || variant?.modelSha256 || "",
+    mediapipe_blendshapes_enabled: variant?.mediapipeBlendshapes !== false,
+    ort_provider: runtime?.provider || variant?.ortProvider || "",
+    model_load_ms: runtime?.modelLoadMs ?? 0,
+    avatar_backend: avatarBackend || "vrm",
+    gnm_asset_version: gnm?.gnm_asset_version || "3.0.0",
+    gnm_asset_sha256: gnm?.gnm_asset_sha256 || "",
+    gnm_load_ms: gnm?.gnm_load_ms ?? 0,
+    gnm_identity_fit_ms: gnm?.gnm_identity_fit_ms ?? 0,
+    gnm_state: gnm?.gnm_state || "idle",
+    gnm_fallback: !!gnm?.gnm_fallback,
+    frontend_version: frontendVersion,
+    run_seconds: seconds,
+    analysis_window_ms: analysisWindowMs,
+    cold_start_confirmed: !!coldConfirmed,
+    unobserved: ["temperature", "power", "thermal_throttling", "background_apps"],
+    runs: runSummaries,
+    valid_runs: validRuns.length,
+    invalid_runs: runSummaries.length - validRuns.length,
+    average_fps: round(averageFps, 3) ?? 0,
+  };
+}
+
+function collectOneRun({
+  source, landmarker, detect, variant, runtime, avatar, avatarBackend, applyFrame,
+  runId, deviceId, repeatIndex, cacheState, seconds, onTick, signal,
+}) {
+  return new Promise((resolve) => {
+    const rows = [];
+    const runStart = performance.now();
+    let lastRaf = null;
+    let lastTs = 0;
+    let frameIndex = 0;
+    let detected = 0;
+    let hidden = false;
+    let aborted = false;
+    let lastTick = 0;
+
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") hidden = true;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const finish = (error = null) => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      resolve({ rows, detected, hidden, aborted, error });
+    };
+
+    const step = async (rafTime) => {
+      try {
+        if (signal?.aborted) {
+          aborted = true;
+          return finish();
+        }
+        if (hidden || document.visibilityState === "hidden") {
+          hidden = true;
+          return finish();
+        }
+        const now = performance.now();
+        if (now - runStart >= seconds * 1000) return finish();
+
+        const canvas = source.draw(now);
+        let ts = Math.round(now);
+        if (ts <= lastTs) ts = lastTs + 1;
+        lastTs = ts;
+
+        const got = await detect(canvas, "video", ts);
+        if (signal?.aborted) {
+          aborted = true;
+          return finish();
+        }
+        const frame = got.frame;
+        const perceptionMs = got.perceptionMs || 0;
+        const onnxMs = got.onnxMs || 0;
+        let mappingMs = 0;
+        if (frame) {
+          try {
+            applyFrame(frame);
+            mappingMs = avatar?.lastMappingMs || 0;
+          } catch {}
+        }
+        const timing = avatar?.lastTiming || { rigMs: 0, renderMs: 0 };
+        const interval = lastRaf == null ? 0 : Math.max(0, rafTime - lastRaf);
+        lastRaf = rafTime;
+        const rigMs = timing.rigMs || 0;
+        const renderMs = timing.renderMs || 0;
+        const workMs = perceptionMs + onnxMs + mappingMs + rigMs + renderMs;
+        const gnm = avatar?.lastGnm || null;
+        if (frame) detected++;
+
+        rows.push({
+          run_id: runId,
+          device_id: deviceId,
+          repeat_index: repeatIndex,
+          cache_state: cacheState,
+          timestamp_ms: Math.round(now - runStart),
+          video_time_ms: Math.round(source.videoTimeMs?.() ?? 0),
+          frame_index: frameIndex,
+          perception_ms: perceptionMs,
+          onnx_ms: onnxMs,
+          mapping_ms: mappingMs,
+          rig_ms: rigMs,
+          render_ms: renderMs,
+          work_ms: workMs,
+          frame_interval_ms: interval,
+          face_detected: frame ? 1 : 0,
+          over_budget_work: workMs > FRAME_BUDGET_MS ? 1 : 0,
+          over_budget_interval: interval > FRAME_BUDGET_MS ? 1 : 0,
+          visibility_state: 1,
+          perception_variant: variant?.key || "mp_full",
+          blendshape_source: variant?.blendshapeSource || "mediapipe",
+          model_sha256: runtime?.sha256 || variant?.modelSha256 || "",
+          mediapipe_blendshapes_enabled: variant?.mediapipeBlendshapes !== false,
+          avatar_backend: avatarBackend || "vrm",
+          gnm_state: gnm?.gnm_state || "",
+          gnm_fallback: gnm?.gnm_fallback ? 1 : 0,
+          gnm_load_ms: gnm?.gnm_load_ms || 0,
+          gnm_identity_fit_ms: gnm?.gnm_identity_fit_ms || 0,
+          gnm_solve_ms: gnm?.gnm_solve_ms || 0,
+          gnm_forward_ms: gnm?.gnm_forward_ms || 0,
+          gnm_render_ms: gnm?.gnm_render_ms || 0,
+          gnm_frame_ms: gnm?.gnm_frame_ms || 0,
+        });
+        frameIndex++;
+
+        if (now - lastTick > 200) {
+          lastTick = now;
+          onTick?.({
+            repeatIndex,
+            cacheState,
+            elapsedMs: now - runStart,
+            seconds,
+          });
+        }
+        requestAnimationFrame(step);
+      } catch (e) {
+        finish(e);
+      }
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+function collectAbortError() {
+  try {
+    return new DOMException("Aborted", "AbortError");
+  } catch {
+    const err = new Error("Aborted");
+    err.name = "AbortError";
+    return err;
+  }
+}
+
+async function collectAll({
+  getLandmarker, getAvatar, getAvatarBackend, applyFrame, getInfo, detectFrame, variant, getRuntime,
+  seconds, label, frontendVersion, ui, signal,
+}) {
+  const landmarker = getLandmarker();
+  const avatar = getAvatar();
+  if (!landmarker) throw new Error("推理引擎未就绪");
+  if (!avatar?.ready) throw new Error("数字虚拟人未就绪");
+
+  const runtime = getRuntime?.() || null;
+  const avatarBackend = getAvatarBackend?.() || "vrm";
+  const deviceId = getCollectDeviceId();
+  const deviceLabel = (ui.labelInput.value || label || "").trim();
+  const batchStamp = collectStamp();
+  const analysisWindowMs = seconds <= 3 ? 0 : 1000;
+
+  ui.status.textContent = "准备 Benchmark…";
+  if (signal?.aborted) throw collectAbortError();
+  const resp = await fetch(COLLECT_VIDEO_URL, { cache: "no-cache", signal });
+  if (!resp.ok) throw new Error(`固定视频加载失败：HTTP ${resp.status}`);
+  if (signal?.aborted) throw collectAbortError();
+  const blob = await resp.blob();
+  const sha256 = await sha256Hex(await blob.arrayBuffer());
+  if (signal?.aborted) throw collectAbortError();
+  const file = new File([blob], "single-face-30fps.mp4", { type: "video/mp4" });
+  const preview = document.getElementById("collect-preview");
+  const source = await createSource("local-video", file, {
+    srcUrl: COLLECT_VIDEO_URL,
+    videoEl: preview,
+    onStatus: () => { ui.status.textContent = "准备 Benchmark…"; },
+    signal,
+  });
+  if (signal?.aborted) {
+    source.cleanup();
+    throw collectAbortError();
+  }
+  if (!source.width || !source.height) {
+    source.cleanup();
+    throw new Error("固定视频尺寸未就绪，请刷新重试");
+  }
+
+  ui.status.textContent = "Benchmark 进行中…";
+  const refreshHz = await measureRefreshHz();
+  const info = getInfo?.() || {};
+  const rows = [];
+  const runSummaries = [];
+  let aborted = false;
+
+  try {
+    for (let repeatIndex = 1; repeatIndex <= COLLECT_REPEATS; repeatIndex++) {
+      if (aborted || signal?.aborted) {
+        aborted = true;
+        break;
+      }
+      const cacheState = repeatIndex === 1 ? "cold" : "warm";
+      const runId = `${deviceId}-${batchStamp}-${avatarBackend}-r${String(repeatIndex).padStart(2, "0")}`;
+      ui.status.textContent = "Benchmark 进行中…";
+      ui.bar.style.transform = `scaleX(${Math.min(1, (repeatIndex - 1) / COLLECT_REPEATS)})`;
+
+      try {
+        await source.reset();
+      } catch (e) {
+        runSummaries.push({
+          repeat_index: repeatIndex,
+          run_id: runId,
+          cache_state: cacheState,
+          load_ms: null,
+          startup_ms: null,
+          valid: false,
+          invalid_reason: "video_error",
+          face_detection_ratio: 0,
+          fps: 0,
+          frame_count: 0,
+        });
+        aborted = true;
+        break;
+      }
+
+      const result = await collectOneRun({
+        source,
+        landmarker,
+        detect: detectFrame,
+        variant,
+        runtime,
+        avatar,
+        avatarBackend,
+        applyFrame,
+        runId,
+        deviceId,
+        repeatIndex,
+        cacheState,
+        seconds,
+        signal,
+        onTick: (tick) => {
+          const remaining = (COLLECT_REPEATS - tick.repeatIndex) * tick.seconds +
+            (tick.seconds - tick.elapsedMs / 1000);
+          const fraction = (tick.repeatIndex - 1) + Math.min(1, tick.elapsedMs / (tick.seconds * 1000));
+          ui.status.textContent = `Benchmark 进行中 · ${approxRemainingLabel(remaining)}`;
+          ui.bar.style.transform = `scaleX(${Math.min(1, fraction / COLLECT_REPEATS)})`;
+        },
+      });
+
+      if (result.error) throw result.error;
+      rows.push(...result.rows);
+      const windowRows = result.rows.filter((r) => r.timestamp_ms >= analysisWindowMs);
+      const ratio = result.rows.length ? result.detected / result.rows.length : 0;
+      const wasAborted = !!result.aborted || !!signal?.aborted;
+      const valid = !wasAborted && !result.hidden && ratio >= 0.5 && windowRows.length >= 2;
+      const invalidReason = wasAborted
+        ? "aborted"
+        : result.hidden
+          ? "hidden"
+          : ratio < 0.5
+            ? "low_face_detection"
+            : windowRows.length < 2
+              ? "too_few_frames"
+              : null;
+      const elapsed = windowRows.length >= 2
+        ? windowRows[windowRows.length - 1].timestamp_ms - windowRows[0].timestamp_ms
+        : 0;
+      const fps = valid && elapsed > 0 ? (windowRows.length / elapsed) * 1000 : 0;
+      const onnxValues = result.rows.map((r) => r.onnx_ms).filter((v) => Number.isFinite(v));
+      const mappingValues = result.rows.map((r) => r.mapping_ms).filter((v) => Number.isFinite(v));
+      const workValues = result.rows.map((r) => r.work_ms).filter((v) => Number.isFinite(v));
+      const onnxStats = summarize(onnxValues);
+      const mappingStats = summarize(mappingValues);
+      const workStats = summarize(workValues);
+      const summary = {
+        repeat_index: repeatIndex,
+        run_id: runId,
+        cache_state: cacheState,
+        load_ms: null,
+        startup_ms: null,
+        valid,
+        invalid_reason: invalidReason,
+        face_detection_ratio: round(ratio, 3) ?? 0,
+        fps: round(fps, 3) ?? 0,
+        frame_count: windowRows.length,
+        onnx_p50_ms: round(onnxStats.p50, 3),
+        onnx_p95_ms: round(onnxStats.p95, 3),
+        mapping_p50_ms: round(mappingStats.p50, 3),
+        mapping_p95_ms: round(mappingStats.p95, 3),
+        work_p50_ms: round(workStats.p50, 3),
+        work_p95_ms: round(workStats.p95, 3),
+      };
+      runSummaries.push(summary);
+      ui.addRun(summary);
+      if (wasAborted) {
+        aborted = true;
+        ui.status.textContent = "Benchmark 已终止；已完成数据可下载。";
+      } else if (result.hidden) {
+        aborted = true;
+        ui.status.textContent = "页面切到后台，Benchmark 已中止。";
+      }
+    }
+  } finally {
+    source.cleanup();
+    try {
+      preview?.pause();
+    } catch {}
+  }
+
+  const meta = buildCollectMeta({
+    deviceId,
+    deviceLabel,
+    coldConfirmed: false,
+    seconds,
+    analysisWindowMs,
+    input: { sha256 },
+    source,
+    runSummaries,
+    refreshHz,
+    info,
+    frontendVersion,
+    variant,
+    runtime,
+    avatarBackend,
+    gnm: avatar?.lastGnm || null,
+  });
+  const csv = buildCollectCsv(rows.map((r) => collectRow(
+    r.run_id, r.device_id, r.repeat_index, r.cache_state, r
+  )));
+  ui.finish({ rows, meta, csv, deviceId, batchStamp, runSummaries, aborted });
+}
+
+export function startCollectMode({
+  getLandmarker,
+  getAvatar,
+  applyFrame,
+  getInfo,
+  detectFrame,
+  variant,
+  getRuntime,
+  getAvatarBackend,
+  seconds = 30,
+  label = "",
+  frontendVersion = "v26",
+}) {
+  const $ = (id) => document.getElementById(id);
+  const card = $("collect-card");
+  if (!card) return null;
+
+  const secs = Math.max(1, Math.min(300, Number(seconds) || 30));
+  const ui = {
+    card,
+    status: $("collect-status"),
+    bar: $("collect-bar"),
+    runs: $("collect-runs"),
+    summary: $("collect-summary"),
+    zip: $("collect-zip"),
+    abort: $("collect-abort"),
+    labelInput: $("collect-label"),
+    start: $("collect-start"),
+    note: $("collect-note"),
+    addRun(summary) {
+      const li = document.createElement("li");
+      li.textContent = `第 ${summary.repeat_index} 轮 · ${summary.cache_state} · ${
+        summary.valid ? `${summary.fps} FPS` : `无效（${summary.invalid_reason}）`
+      }`;
+      this.runs.appendChild(li);
+    },
+    finish({ rows, meta, csv, deviceId, batchStamp, runSummaries, aborted }) {
+      if (!aborted) this.bar.style.transform = "scaleX(1)";
+      const valid = runSummaries.filter((r) => r.valid);
+      const avg = valid.length
+        ? valid.reduce((sum, r) => sum + r.fps, 0) / valid.length
+        : 0;
+      if (aborted) {
+        this.summary.textContent = "Benchmark 已中止";
+      } else if (valid.length === runSummaries.length) {
+        this.summary.textContent = `Benchmark 完成 · 平均 ${(round(avg, 3) ?? 0)} FPS`;
+      } else {
+        this.summary.textContent = "Benchmark 完成 · 部分数据无效";
+      }
+      this.status.textContent = aborted
+        ? "Benchmark 已中止；已完成数据可下载。"
+        : "Benchmark 完成；可下载数据。";
+      if (rows.length > 0) {
+        const base = `dash-collect-${meta.avatar_backend || "vrm"}-${variant?.key || "mp_full"}-${String(deviceId).slice(0, 8)}-${batchStamp}`;
+        const zip = makeCollectZip([
+          { name: `${base}.csv`, data: `\uFEFF${csv}` },
+          { name: `${base}-meta.json`, data: JSON.stringify(meta, null, 2) },
+        ]);
+        this.zip.onclick = () => download(`${base}.zip`, zip, "application/zip");
+      }
+      this.zip.hidden = !this.zip.onclick;
+      this.zip.disabled = !this.zip.onclick;
+    },
+  };
+
+  ui.runs.hidden = true;
+  const timeEl = $("collect-time");
+  if (timeEl) {
+    const suffix = variant && variant.key !== "mp_full" ? ` · ${variant.label}` : "";
+    timeEl.textContent = `标准测试${suffix}：${approxCollectLabel(secs)}；固定测试视频，不显示画面，请保持前台。`;
+  }
+  const intro = $("collect-intro");
+  if (intro) {
+    intro.textContent = `本地测试，不调用摄像头、不上传；全程${approxCollectLabel(secs)}，请保持页面在前台。`;
+  }
+  ui.start.textContent = `开始 Benchmark（${approxCollectLabel(secs)}）`;
+  ui.labelInput.value = label || "";
+  if (ui.note) {
+    ui.note.textContent = "测试视频，非摄像头画面；本地处理，不上传；请保持页面在前台。";
+  }
+
+  let running = false;
+  let ready = false;
+  let collectAbort = null;
+  const sync = () => {
+    ui.start.disabled = running || !ready;
+    if (ui.abort) ui.abort.hidden = !running;
+  };
+  ui.abort?.addEventListener("click", () => {
+    if (!running) return;
+    ui.abort.disabled = true;
+    ui.status.textContent = "正在终止 Benchmark…";
+    collectAbort?.abort();
+  });
+  ui.start.addEventListener("click", async () => {
+    if (running || !ready) return;
+    running = true;
+    sync();
+    ui.labelInput.disabled = true;
+    ui.start.textContent = "Benchmark 进行中…";
+    ui.abort.disabled = false;
+    ui.runs.innerHTML = "";
+    ui.summary.textContent = "";
+    ui.bar.style.transform = "scaleX(0)";
+    ui.zip.hidden = true;
+    ui.zip.disabled = true;
+    collectAbort = new AbortController();
+    try {
+      await collectAll({
+        getLandmarker,
+        getAvatar,
+        applyFrame,
+        getInfo,
+        detectFrame,
+        variant,
+        getRuntime,
+        getAvatarBackend,
+        seconds: secs,
+        label,
+        frontendVersion,
+        ui,
+        signal: collectAbort.signal,
+      });
+    } catch (e) {
+      if (e?.name === "AbortError") {
+        ui.status.textContent = "Benchmark 已终止。";
+        if (ui.zip.onclick) {
+          ui.summary.textContent = "Benchmark 已终止；上一组数据仍可下载。";
+        }
+      } else {
+        ui.status.textContent = `Benchmark 失败：${e.message || e}`;
+      }
+    } finally {
+      running = false;
+      ui.labelInput.disabled = false;
+      ui.start.textContent = `开始 Benchmark（${approxCollectLabel(secs)}）`;
+      if (ui.abort) {
+        ui.abort.hidden = true;
+        ui.abort.disabled = false;
+      }
+      if (ui.zip.onclick) {
+        ui.zip.hidden = false;
+        ui.zip.disabled = false;
+      } else {
+        ui.zip.hidden = true;
+        ui.zip.disabled = true;
+      }
+      sync();
+    }
+  });
+
+  ui.status.textContent = "等待模型就绪…";
+  sync();
+  return {
+    setReady(on) {
+      ready = !!on;
+      sync();
+      if (ready && !running) ui.status.textContent = "已就绪；可开始 Benchmark。";
+    },
+    abort() {
+      if (!running) return;
+      ui.status.textContent = "正在终止 Benchmark…";
+      collectAbort?.abort();
+    },
+    seconds: secs,
   };
 }

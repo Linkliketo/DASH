@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DASH · 微表情皮套人</title>
-<link rel="stylesheet" href="styles.css?v=9">
+<title>DASH · 微表情数字虚拟人</title>
+<link rel="stylesheet" href="styles.css?v=12">
 <script type="importmap">
 {"imports":{
   "three": "./vendor/three.module.js",
@@ -21,7 +21,7 @@
   <header class="paper-card statusbar" id="statusbar">
     <span class="tape tape-nw"></span><span class="tape tape-ne"></span>
     <div class="brand">
-      <span class="logo">DASH <em>·</em> 微表情皮套人</span>
+      <span class="logo">DASH <em>·</em> 微表情数字虚拟人</span>
       <span class="version mono">v0.1-SHOWCASE</span>
     </div>
     <div class="status">
@@ -36,7 +36,7 @@
   <div class="hero-mobile paper-card">
     <div class="hero-copy">
       <h1>你的表情，实时长成一个 3D 角色</h1>
-      <p>打开摄像头，或丢入照片 / 视频，皮套人立刻模仿你的表情。</p>
+      <p>打开摄像头，或丢入照片 / 视频，数字虚拟人立刻模仿你的表情。</p>
     </div>
     <div class="hero-chips mono">
       <span class="chip chip-blue">摄像头 · 照片 · 视频</span>
@@ -90,10 +90,13 @@
     <!-- ZONE 02 输出卡 -->
     <section class="paper-card card-output" id="output-card">
       <span class="pushpin pin-blue"></span>
-      <div class="zone mono zone-blue">[ ZONE 02 : 皮套人 ]</div>
+      <div class="zone mono zone-blue">[ ZONE 02 : 数字虚拟人 ]</div>
       <div class="card-head">
-        <h2 class="card-title title-blue">皮套人预览</h2>
-        <label class="picker avatar-picker mono">皮套人
+        <div class="avatar-backend-switch" role="group" aria-label="虚拟人类型">
+          <button type="button" class="avatar-backend-btn active" data-avatar-backend="vrm" aria-pressed="true">动漫虚拟人</button>
+          <button type="button" class="avatar-backend-btn" data-avatar-backend="gnm" aria-pressed="false">数字模拟人</button>
+        </div>
+        <label class="picker avatar-picker mono">数字虚拟人
           <select id="avatar-select" disabled><option>加载中…</option></select>
         </label>
       </div>
@@ -104,10 +107,10 @@
         <div class="render-idle" id="render-idle">
           <img src="assets/img/icon-axis-3d.svg" alt="">
           <p class="idle-main">等待开始演示</p>
-          <p class="mono idle-sub">VRM · 52 BLENDSHAPE</p>
+          <p class="mono idle-sub" id="avatar-idle-sub">VRM · 52 BLENDSHAPE</p>
         </div>
         <div class="avatar-progress mono" id="avatar-progress" hidden>
-          <span id="avatar-progress-text">准备加载皮套人…</span>
+          <span id="avatar-progress-text">准备加载数字虚拟人…</span>
           <span class="avatar-progress-track"><i id="avatar-progress-bar"></i></span>
         </div>
       </div>
@@ -135,56 +138,90 @@
       </div>
     </section>
 
-    <!-- ZONE 03 性能测试（Benchmark）：真实媒体输入 + 30 FPS 硬约束 -->
+    <!-- ZONE 03 性能测试：快速测试 / 标准测试 -->
     <section class="paper-card benchmark-card" id="benchmark-card">
       <span class="pushpin pin-yellow"></span>
       <span class="pushpin pin-green"></span>
       <div class="strip-head">
         <h3>性能测试</h3>
-        <span class="mono strip-tag">BENCHMARK · 30 FPS / 33 MS</span>
-      </div>
-
-      <div class="bench-controls mono">
-        <label>信号源
-          <select id="bench-source">
-            <option value="builtin">内置头像（隐藏输入）</option>
-            <option value="local-image">本地图片</option>
-            <option value="local-video">本地视频</option>
-            <option value="camera">摄像头</option>
-          </select>
-        </label>
-        <button class="btn btn-ghost" id="bench-file-btn" hidden>选择文件</button>
-        <input type="file" id="bench-file" hidden>
-        <span class="bench-file" id="bench-file-name"></span>
-        <span class="bench-sep"></span>
-        <label>方式
-          <select id="bench-mode">
-            <option value="duration">按时长</option>
-            <option value="frames">按帧数</option>
-          </select>
-        </label>
-        <label>
-          <input type="number" id="bench-value" min="5" max="600" value="30">
-          <span id="bench-unit">s</span>
-        </label>
-        <button class="btn btn-primary" id="bench-start" disabled>开始测试</button>
-        <button class="btn" id="bench-abort" hidden>中止</button>
-      </div>
-
-      <p class="bench-privacy mono" id="bench-privacy">隐私：未调用摄像头；画面只在本机处理，不会上传。</p>
-
-      <div class="bench-live" id="bench-live" hidden>
-        <div class="bench-live-row mono">
-          <span><b id="bench-live-fps">—</b> FPS</span>
-          <span>感知 <b id="bench-live-perception">—</b> ms</span>
-          <span>rig+渲染 <b id="bench-live-rig">—</b> ms</span>
-          <span id="bench-live-frames">预热</span>
+        <div class="bench-tabs mono" role="tablist" aria-label="Benchmark 模式">
+          <button type="button" class="bench-tab active" id="bench-tab-quick" data-bench-mode="quick" role="tab" aria-selected="true">快速测试</button>
+          <button type="button" class="bench-tab" id="bench-tab-standard" data-bench-mode="standard" role="tab" aria-selected="false">标准测试</button>
         </div>
-        <div class="bench-progress"><i id="bench-progress-bar"></i></div>
       </div>
 
-      <p class="bench-hint mono" id="bench-status">默认 30 s；丢弃前 1 s 预热；后台标签页会中止测试。</p>
-      <div class="bench-result" id="bench-result" hidden></div>
+      <div class="bench-panel" id="bench-panel-quick">
+        <p class="bench-time mono" id="bench-quick-time">快速测试：默认约 30 秒（含前 1 s 预热）</p>
+
+        <div class="bench-controls mono">
+          <label>信号源
+            <select id="bench-source">
+              <option value="builtin">内置头像（隐藏输入）</option>
+              <option value="local-image">本地图片</option>
+              <option value="local-video">本地视频</option>
+              <option value="camera">摄像头</option>
+            </select>
+          </label>
+          <button class="btn btn-ghost" id="bench-file-btn" hidden>选择文件</button>
+          <input type="file" id="bench-file" hidden>
+          <span class="bench-file" id="bench-file-name"></span>
+          <span class="bench-sep"></span>
+          <label>方式
+            <select id="bench-mode">
+              <option value="duration">按时长</option>
+              <option value="frames">按帧数</option>
+            </select>
+          </label>
+          <label>
+            <input type="number" id="bench-value" min="5" max="600" value="30">
+            <span id="bench-unit">s</span>
+          </label>
+          <button class="btn btn-primary" id="bench-start" disabled>开始测试</button>
+          <button class="btn" id="bench-abort" hidden>中止</button>
+        </div>
+
+        <p class="bench-privacy mono" id="bench-privacy">隐私：未调用摄像头；画面只在本机处理，不会上传。</p>
+
+        <div class="bench-live" id="bench-live" hidden>
+          <div class="bench-live-row mono">
+            <span><b id="bench-live-fps">—</b> FPS</span>
+            <span>感知 <b id="bench-live-perception">—</b> ms</span>
+            <span>rig+渲染 <b id="bench-live-rig">—</b> ms</span>
+            <span id="bench-live-frames">预热</span>
+          </div>
+          <div class="bench-progress"><i id="bench-progress-bar"></i></div>
+        </div>
+
+        <p class="bench-hint mono" id="bench-status">默认 30 s；丢弃前 1 s 预热；后台标签页会中止测试。</p>
+        <div class="bench-result" id="bench-result" hidden></div>
+      </div>
+
+      <div class="bench-panel collect-panel" id="collect-card" hidden>
+        <p class="bench-time mono" id="collect-time">标准测试：约 5 分钟；固定测试视频，不显示画面，请保持前台。</p>
+        <p class="collect-intro" id="collect-intro">固定测试视频，不调用摄像头、不上传。</p>
+
+        <div class="collect-controls">
+          <label class="collect-label mono">设备标签
+            <input type="text" id="collect-label" maxlength="80" placeholder="例如：i5-8250U / RTX 4060">
+          </label>
+          <button class="btn btn-primary" id="collect-start" disabled>开始 Benchmark（约 5 分钟）</button>
+          <button class="btn" id="collect-abort" hidden>终止 Benchmark</button>
+        </div>
+
+        <video class="collect-preview" id="collect-preview" muted playsinline loop aria-hidden="true" tabindex="-1"></video>
+        <div class="collect-progress">
+          <div class="collect-progress-track"><i id="collect-bar"></i></div>
+          <p class="mono" id="collect-status">等待模型就绪…</p>
+        </div>
+        <ol class="collect-runs mono" id="collect-runs" hidden></ol>
+        <p class="collect-summary mono" id="collect-summary"></p>
+        <div class="collect-actions">
+          <button class="btn btn-primary" id="collect-zip" hidden disabled>下载数据包 ZIP</button>
+        </div>
+        <p class="collect-note mono" id="collect-note">
+          测试视频，非摄像头画面；本地处理，不上传；请保持页面在前台。
+        </p>
+      </div>
     </section>
 
     <!-- 底部横条：landing=示例拍立得 / stage=实时读数 -->
@@ -228,7 +265,7 @@
       <b>QUICK GUIDE:</b>
       <p>1. 选一个输入</p>
       <p>2. 看网格跟随</p>
-      <p>3. 看皮套人模仿</p>
+      <p>3. 看数字虚拟人模仿</p>
     </div>
   </div>
 </div>
@@ -241,6 +278,6 @@
   </div>
 </div>
 
-<script type="module" src="src/main.js?v=13"></script>
+<script type="module" src="src/main.js?v=26"></script>
 </body>
 </html>

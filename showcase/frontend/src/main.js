@@ -1,13 +1,27 @@
 // 状态机与组装：landing / stage(camera|photo|video)
 // 感知全部在浏览器本地（MediaPipe Tasks JS），服务器只是静态托管 + 模型分发。
-import { Avatar } from "./avatar.js?v=13";
-import { MeshOverlay } from "./mesh.js?v=13";
-import { Readout, GROUPS_A, GROUPS_B } from "./readout.js?v=13";
-import { SourceInput } from "./input.js?v=13";
-import { poseMetrics, handMetrics } from "./metrics.js?v=13";
-import * as perception from "./perception.js?v=13";
-import { ensureEntry, ensureModel, blobToBuffer, fetchManifest, modelKind } from "./modelstore.js?v=13";
-import { createBenchmarkPanel } from "./benchmark.js?v=13";
+import { Avatar } from "./avatar.js?v=26";
+import { VrmBackend } from "./backends/vrm_backend.js?v=26";
+import { AvatarManager } from "./avatar_manager.js?v=26";
+import { GnmBackend } from "./backends/gnm_backend.js?v=26";
+import { MeshOverlay } from "./mesh.js?v=26";
+import { Readout, GROUPS_A, GROUPS_B } from "./readout.js?v=26";
+import { SourceInput } from "./input.js?v=26";
+import { poseMetrics, handMetrics } from "./metrics.js?v=26";
+import * as perception from "./perception.js?v=26";
+import { ensureEntry, ensureModel, blobToBuffer, fetchManifest, modelKind } from "./modelstore.js?v=26";
+import { createBenchmarkPanel, startCollectMode } from "./benchmark.js?v=26";
+import { resolveVariant, getVariant } from "./variants.js?v=26";
+
+const collectQuery = new URLSearchParams(location.search);
+const collectMode = collectQuery.get("bench") === "collect";
+const collectSeconds = Math.max(1, Math.min(300, Number(collectQuery.get("seconds")) || 30));
+const collectLabel = collectQuery.get("label") || "";
+const variantKey = resolveVariant();
+const variantConfig = getVariant(variantKey);
+if (variantConfig.key !== "mp_full") {
+  document.title = `DASH · 微表情数字虚拟人 · ${variantConfig.label}`;
+}
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -55,7 +69,7 @@ let faceLmVideo = null;
 let faceLmImage = null;
 let activeModelName = "face_landmarker";
 
-// 皮套人：manifest 条目 + 懒加载（首次需要时才下载/解析）
+// 数字虚拟人：manifest 条目 + 懒加载（首次需要时才下载/解析）
 const FALLBACK_AVATAR = {
   name: "vrm-girl",
   kind: "avatar",
@@ -71,6 +85,9 @@ let avatarLoadingPromise = null;
 let manifestCache = null;
 let benchActive = false;
 let bench = null;
+let collectPanel = null;
+let benchMode = "quick";
+let variantRuntime = null;
 
 // 版本：A 面部（当前）；B 全身（二期，按钮置灰）
 const MODE_VIEWS = { a: ["head"], b: ["head", "half", "full"] };
@@ -81,6 +98,14 @@ const input = new SourceInput({ box: els.sourceBox, image: els.sourceImage, vide
 const mesh = new MeshOverlay(els.meshCanvas);
 const readout = new Readout(els.readoutEl);
 let avatar = null;
+let avatarManager = null;
+let vrmBackend = null;
+let gnmBackend = null;
+let gnmLoadController = null;
+let gnmLoadToken = 0;
+let gnmLoading = false;
+let avatarBackend = "vrm";
+let lastFaceFrame = null;
 
 /* ---------------- 工具 ---------------- */
 function setStatus(text) {
@@ -94,7 +119,7 @@ function showOverlay(text, withRetry) {
   els.overlay.hidden = false;
 }
 
-/* ---------------- 皮套人：manifest 下拉 + 懒加载 + 进度 ---------------- */
+/* ---------------- 数字虚拟人：manifest 下拉 + 懒加载 + 进度 ---------------- */
 
 function entryLabel(entry) {
   return entry.label || entry.name;
@@ -125,7 +150,7 @@ async function refreshModels() {
   } catch {
     manifest = { models: [FALLBACK_AVATAR] };
     manifestCache = manifest;
-    setAvatarError("manifest 读取失败，皮套人使用内置默认条目");
+    setAvatarError("manifest 读取失败，数字虚拟人使用内置默认条目");
   }
 
   const perceptions = manifest.models.filter((m) => modelKind(m) === "perception");
@@ -157,7 +182,7 @@ async function refreshModels() {
   els.avatarSelect.disabled = avatarEntries.length < 2;
 }
 
-// 真正需要驱动/显示皮套人时再加载；并发调用共享同一个 Promise
+// 真正需要驱动/显示数字虚拟人时再加载；并发调用共享同一个 Promise
 async function ensureAvatarLoaded() {
   if (avatar && avatar.ready && loadedAvatarName === activeAvatarName) return true;
   if (avatarLoadingPromise) return avatarLoadingPromise;
@@ -170,17 +195,17 @@ async function ensureAvatarLoaded() {
       const { blob, fromCache } = await ensureEntry(entry, (recv, total) => {
         const pct = total ? Math.round((recv / total) * 100) : null;
         const size = `${(recv / 1048576).toFixed(1)}${total ? ` / ${(total / 1048576).toFixed(1)}` : ""} MB`;
-        const text = pct == null ? `下载皮套人 ${size}` : `下载皮套人 ${pct}% · ${size}`;
+        const text = pct == null ? `下载数字虚拟人 ${size}` : `下载数字虚拟人 ${pct}% · ${size}`;
         setAvatarProgress(pct, text);
         setStatus(text);
       });
-      setAvatarProgress(null, "解析皮套人模型…");
-      setStatus("解析皮套人模型…");
+      setAvatarProgress(null, "解析数字虚拟人模型…");
+      setStatus("解析数字虚拟人模型…");
       await avatar.loadFromBlob(blob);
       loadedAvatarName = entry.name;
       els.renderIdle.hidden = true;
       setAvatarProgress(null, null);
-      setStatus(`皮套人就绪：${entryLabel(entry)}${fromCache ? "（本地缓存）" : ""}`);
+      setStatus(`数字虚拟人就绪：${entryLabel(entry)}${fromCache ? "（本地缓存）" : ""}`);
       return true;
     } catch (e) {
       const raw = String(e.message || e);
@@ -188,8 +213,8 @@ async function ensureAvatarLoaded() {
         ? `网络错误，未能下载 ${entryLabel(entry)}`
         : raw;
       setAvatarProgress(null, null);
-      setAvatarError(`皮套人加载失败：${msg}（继续使用当前模型）`);
-      setStatus(`皮套人加载失败：${msg}`);
+      setAvatarError(`数字虚拟人加载失败：${msg}（继续使用当前模型）`);
+      setStatus(`数字虚拟人加载失败：${msg}`);
       return false;
     } finally {
       avatarLoadingPromise = null;
@@ -230,13 +255,21 @@ function flatLandmarks(lm) {
   return lm; // 已是 flat
 }
 
-function applyFrame({ blendshapes, headEuler, landmarks }, { advanceReadout = true, mirror = false, snap = false } = {}) {
+function applyFrame({ blendshapes, headEuler, landmarks, aspect }, { advanceReadout = true, mirror = false, snap = false } = {}) {
   const facePresent = !!landmarks;
   if (facePresent) {
     lastFacePresentAt = performance.now();
     els.nofaceBadge.hidden = true;
-    avatar.setBlendshapes(blendshapes, { mirror, snap });
-    if (headEuler) avatar.setHeadEuler(headEuler, { mirror });
+    const payload = { blendshapes, headEuler, landmarks, aspect };
+    lastFaceFrame = payload;
+    if (gnmBackend && gnmBackend.state === "capturing") {
+      gnmBackend.captureFrame(payload);
+    }
+    try {
+      avatarManager?.update(payload, { mirror, snap });
+    } catch (error) {
+      if (avatarBackend === "gnm") fallbackToVrm(error?.message || String(error));
+    }
     els.renderIdle.hidden = true;
   }
   mesh.draw(facePresent ? flatLandmarks(landmarks) : null);
@@ -297,6 +330,23 @@ function backToLanding() {
   els.fps.textContent = "";
 }
 
+async function detectCurrent(media, mode = "video", ts = performance.now()) {
+  const got = await perception.detectFrame({
+    landmarker: mode === "image" ? faceLmImage : faceLmVideo,
+    runtime: variantRuntime,
+    variant: variantConfig,
+    media,
+    mode,
+    ts,
+  });
+  if (got.frame) {
+    const w = media.videoWidth || media.width || media.naturalWidth || 0;
+    const h = media.videoHeight || media.height || media.naturalHeight || 0;
+    got.frame.aspect = w > 0 && h > 0 ? w / h : 1;
+  }
+  return got;
+}
+
 /* ---------------- camera 模式（本地推理） ---------------- */
 async function startCamera() {
   if (!ready) {
@@ -326,7 +376,8 @@ async function cameraLoop() {
   while (camRunning && state === "camera" && !benchActive) {
     if (video.readyState >= 2 && faceLmVideo) {
       try {
-        const frame = perception.toFrame(faceLmVideo.detectForVideo(video, performance.now()));
+        const got = await detectCurrent(video, "video", performance.now());
+        const frame = got.frame;
         frameCount++;
         if (frame) applyFrame(frame, { mirror: true });
         else {
@@ -353,7 +404,8 @@ async function startPhoto(file) {
   input.setPhoto(file);
   try {
     const bitmap = await createImageBitmap(file);
-    const frame = perception.toFrame(faceLmImage.detect(bitmap));
+    const got = await detectCurrent(bitmap, "image");
+    const frame = got.frame;
     if (!frame) {
       setStatus("没有检测到人脸，换一张试试");
       return;
@@ -379,7 +431,7 @@ async function startVideo(file) {
   setStatus("本地逐帧处理中…");
   const frames = await perception.processVideo(video, faceLmVideo, (done, total) => {
     setStatus(`本地逐帧处理中… ${done}/${total}`);
-  });
+  }, 66, { detectFrame: detectCurrent });
   videoFrames = [];
   for (const item of frames) {
     if (item.ok && item.blendshapes) {
@@ -414,8 +466,9 @@ async function onModelChange() {
   try {
     const { blob } = await ensureModel(name);
     const buf = await blobToBuffer(blob);
-    const nv = await perception.createFaceLandmarker(buf, "VIDEO");
-    const ni = await perception.createFaceLandmarker(buf, "IMAGE");
+    const opts = { outputBlendshapes: variantConfig.mediapipeBlendshapes };
+    const nv = await perception.createFaceLandmarker(buf, "VIDEO", opts);
+    const ni = await perception.createFaceLandmarker(buf, "IMAGE", opts);
     faceLmVideo?.close();
     faceLmImage?.close();
     faceLmVideo = nv;
@@ -437,6 +490,13 @@ function bindEvents() {
   els.btnSecondary.addEventListener("click", () => els.fileInput.click());
   els.stopBtn.addEventListener("click", backToLanding);
   els.modelSelect.addEventListener("change", onModelChange);
+  window.addEventListener("resize", () => gnmBackend?.resize?.());
+  document.querySelectorAll("[data-avatar-backend]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.avatarBackend === "gnm") selectGnm();
+      else selectVrm();
+    });
+  });
   els.faceModeSelect.addEventListener("change", () => {
     faceMode = els.faceModeSelect.value === "custom" ? "custom" : "preset";
     localStorage.setItem("dash.faceMode", faceMode);
@@ -512,6 +572,163 @@ function entrance() {
 }
 
 /* ---------------- 启动 ---------------- */
+function updateAvatarBackendUi(mode) {
+  avatarBackend = mode;
+  document.querySelectorAll("[data-avatar-backend]").forEach((btn) => {
+    const active = btn.dataset.avatarBackend === mode;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  document.body.classList.toggle("gnm-mode", mode === "gnm");
+  const sub = document.getElementById("avatar-idle-sub");
+  if (sub) sub.textContent = mode === "gnm" ? "GNM · 3DMM" : "VRM · 52 BLENDSHAPE";
+  const idle = document.getElementById("render-idle");
+  if (idle) idle.hidden = !!(avatarManager?.ready || (mode === "gnm" && gnmBackend?.ready));
+}
+
+function selectVrm() {
+  gnmLoadToken += 1;
+  gnmLoadController?.abort();
+  gnmLoadController = null;
+  gnmLoading = false;
+  const gnmButton = document.querySelector('[data-avatar-backend="gnm"]');
+  if (gnmButton) gnmButton.disabled = false;
+  gnmBackend?.cancelIdentityCapture?.();
+  if (avatarBackend === "gnm") gnmBackend?.deactivate?.();
+  avatar?.setRenderingEnabled(true);
+  avatarManager?.setActive("vrm");
+  updateAvatarBackendUi("vrm");
+  setAvatarProgress(null);
+  setAvatarError("");
+  setStatus("动漫虚拟人 · VRM");
+}
+
+function fallbackToVrm(message) {
+  const text = message ? `GNM 不可用：${message}` : "GNM 不可用，已回退 VRM";
+  selectVrm();
+  setAvatarError(text);
+  setStatus(text);
+}
+
+async function selectGnm() {
+  if (gnmLoading || avatarBackend === "gnm") return;
+  if (gnmBackend?.ready) {
+    try {
+      avatarManager.register("gnm", gnmBackend);
+      gnmBackend.activate();
+      if (lastFaceFrame) gnmBackend.update(lastFaceFrame, { mirror: state === "camera" });
+      await avatarManager.setActive("gnm");
+      updateAvatarBackendUi("gnm");
+      setAvatarError("");
+      setAvatarProgress(null);
+      setStatus("数字模拟人 · GNM");
+    } catch (error) {
+      fallbackToVrm(error?.message || String(error));
+    }
+    return;
+  }
+
+  if (!gnmBackend) gnmBackend = new GnmBackend(avatar);
+  const token = ++gnmLoadToken;
+  gnmLoadController = new AbortController();
+  gnmLoading = true;
+  const gnmButton = document.querySelector('[data-avatar-backend="gnm"]');
+  if (gnmButton) gnmButton.disabled = true;
+  setAvatarError("");
+  setStatus("正在加载 GNM 资产…");
+  setAvatarProgress(0, "加载 GNM 资产…");
+
+  try {
+    if (!gnmBackend.model) {
+      await gnmBackend.init({
+        signal: gnmLoadController.signal,
+        onProgress: (p) => {
+          if (token !== gnmLoadToken) return;
+          if (p.phase === "download") {
+            setAvatarProgress(p.fraction * 100, `下载 GNM 资产… ${Math.round(p.fraction * 100)}%`);
+          } else if (p.phase === "verify") {
+            setAvatarProgress(100, "校验 GNM 资产…");
+          } else if (p.phase === "done") {
+            setAvatarProgress(100, "GNM 资产已就绪");
+          }
+        },
+      });
+    }
+    if (token !== gnmLoadToken) return;
+
+    setStatus("请保持中性表情约 1.5 秒…");
+    setAvatarProgress(null, "请保持中性表情约 1.5 秒…");
+    const fitPromise = gnmBackend.startIdentityCapture({ durationMs: 1500 });
+    if (lastFaceFrame) gnmBackend.captureFrame(lastFaceFrame);
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("identity fit 超时；请打开摄像头或选择照片/视频")), 8000);
+    });
+    try {
+      await Promise.race([fitPromise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (token !== gnmLoadToken) return;
+    avatarManager.register("gnm", gnmBackend);
+    gnmBackend.activate();
+    if (lastFaceFrame) gnmBackend.update(lastFaceFrame, { mirror: state === "camera" });
+    await avatarManager.setActive("gnm");
+    updateAvatarBackendUi("gnm");
+    requestAnimationFrame(() => gnmBackend?.render());
+    setAvatarError("");
+    setAvatarProgress(null);
+    setStatus("数字模拟人 · GNM");
+  } catch (error) {
+    if (token === gnmLoadToken && error?.name !== "AbortError") {
+      gnmBackend?.cancelIdentityCapture?.();
+      fallbackToVrm(error?.message || String(error));
+    }
+  } finally {
+    if (token === gnmLoadToken) {
+      gnmLoading = false;
+      if (gnmButton) gnmButton.disabled = false;
+      gnmLoadController = null;
+      if (avatarBackend !== "gnm") setAvatarProgress(null, null);
+    }
+  }
+}
+
+function setBenchMode(next) {
+  if (benchMode === "standard" && next !== "standard") collectPanel?.abort();
+  if (benchMode === "quick" && next === "standard") bench?.abort();
+  benchMode = next === "standard" ? "standard" : "quick";
+  const standard = benchMode === "standard";
+  document.body.classList.toggle("bench-standard", standard);
+  document.querySelectorAll("[data-bench-mode]").forEach((btn) => {
+    const on = btn.dataset.benchMode === benchMode;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  const quickPanel = $("bench-panel-quick");
+  const standardPanel = $("collect-card");
+  if (quickPanel) quickPanel.hidden = standard;
+  if (standardPanel) standardPanel.hidden = !standard;
+  if (standard) {
+    activeAvatarName = "vrm-girl";
+    if (els.avatarSelect) els.avatarSelect.value = activeAvatarName;
+    avatar?.setView("half");
+    ensureAvatarLoaded().then((ok) => {
+      if (!ok) setStatus("标准测试：数字虚拟人加载失败");
+    });
+  } else {
+    const savedView = localStorage.getItem("dash.view");
+    if (savedView && MODE_VIEWS[mode].includes(savedView)) avatar?.setView(savedView);
+  }
+}
+
+function setupBenchTabs() {
+  document.querySelectorAll("[data-bench-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => setBenchMode(btn.dataset.benchMode));
+  });
+  setBenchMode(collectMode ? "standard" : "quick");
+}
+
 async function boot() {
   bindEvents();
   const savedFaceMode = localStorage.getItem("dash.faceMode");
@@ -524,6 +741,10 @@ async function boot() {
   });
   try {
     avatar = new Avatar($("avatar-canvas"));
+    vrmBackend = new VrmBackend(avatar);
+    avatarManager = new AvatarManager({ backends: { vrm: vrmBackend } });
+    avatarManager.setActive("vrm");
+    updateAvatarBackendUi("vrm");
     avatar.setFaceMode(faceMode, { reapply: false });
   } catch {
     showOverlay("这个浏览器不支持 WebGL，换 Chrome / Edge 试试", false);
@@ -531,14 +752,17 @@ async function boot() {
   }
   bench = createBenchmarkPanel({
     ensureAvatar: ensureAvatarLoaded,
-    // benchmark 只驱动皮套人，不干扰 ZONE 01 的网格 / 读数
+    getDetect: () => detectCurrent,
+    getVariant: () => variantConfig,
+    getRuntime: () => variantRuntime,
+    // benchmark 只驱动数字虚拟人，不干扰 ZONE 01 的网格 / 读数
     applyFrame: (frame, opts = {}) => {
       if (!frame) return;
-      avatar.setBlendshapes(frame.blendshapes, opts);
+      if (frame.blendshapes) avatar.setBlendshapes(frame.blendshapes, opts);
       if (frame.headEuler) avatar.setHeadEuler(frame.headEuler, opts);
     },
     getLandmarker: () => faceLmVideo,
-    getAvatar: () => avatar,
+    getAvatar: () => avatarManager || avatar,
     getInfo: () => {
       const model = manifestCache?.models?.find((m) => m.name === activeModelName);
       const av = avatarEntries.find((e) => e.name === activeAvatarName);
@@ -556,6 +780,30 @@ async function boot() {
       if (camRunning && state === "camera") cameraLoop();
     },
   });
+  collectPanel = startCollectMode({
+    getLandmarker: () => faceLmVideo,
+    getAvatar: () => avatarManager || avatar,
+    detectFrame: detectCurrent,
+    variant: variantConfig,
+    getRuntime: () => variantRuntime,
+    applyFrame: (frame) => {
+      if (!frame) return;
+      avatarManager?.update(frame, { snap: true });
+    },
+    getInfo: () => {
+      const model = manifestCache?.models?.find((m) => m.name === activeModelName);
+      const av = avatarEntries.find((e) => e.name === activeAvatarName);
+      return {
+        model: { name: activeModelName, version: model?.version || "unknown" },
+        avatar: { name: activeAvatarName, version: av?.version || "unknown" },
+      };
+    },
+    seconds: collectSeconds,
+    label: collectLabel,
+    frontendVersion: "v26",
+  });
+  setupBenchTabs();
+
   // 模型就绪：IndexedDB 有缓存则零网络，否则带进度下载
   setStatus("首次加载推理引擎（wasm 约 13MB，仅第一次慢）…");
   let modelCacheHit = false;
@@ -565,8 +813,9 @@ async function boot() {
     });
     modelCacheHit = fromCache;
     const buf = await blobToBuffer(blob);
-    faceLmVideo = await perception.createFaceLandmarker(buf, "VIDEO");
-    faceLmImage = await perception.createFaceLandmarker(buf, "IMAGE");
+    const lmOptions = { outputBlendshapes: variantConfig.mediapipeBlendshapes };
+    faceLmVideo = await perception.createFaceLandmarker(buf, "VIDEO", lmOptions);
+    faceLmImage = await perception.createFaceLandmarker(buf, "IMAGE", lmOptions);
     ready = true;
     setStatus(fromCache ? "待机（模型来自本地缓存）" : "待机（模型已更新）");
   } catch (e) {
@@ -574,14 +823,33 @@ async function boot() {
     return;
   }
   await refreshModels();
-  setStatus(`待机（${modelCacheHit ? "模型来自本地缓存" : "模型已更新"} · 皮套人按需加载）`);
+  if (variantConfig.modelUrl) {
+    setStatus(`加载 ${variantConfig.label} 的 ONNX 模型…`);
+    try {
+      variantRuntime = await perception.loadOnnxVariant(variantConfig);
+    } catch (e) {
+      showOverlay(`感知变体加载失败：${e.message || e}`, true);
+      return;
+    }
+  }
+  setStatus(`待机（${modelCacheHit ? "模型来自本地缓存" : "模型已更新"} · 数字虚拟人按需加载${variantConfig.key !== "mp_full" ? ` · ${variantConfig.label}` : ""}）`);
   bench?.setReady(true);
-  const savedView = localStorage.getItem("dash.view");
-  if (savedView && MODE_VIEWS[mode].includes(savedView)) {
-    avatar.setView(savedView);
-    document.querySelectorAll(".view-btn").forEach((b) =>
-      b.classList.toggle("active", b.dataset.view === savedView)
-    );
+
+  collectPanel?.setReady(true);
+  if (benchMode === "standard") {
+    activeAvatarName = "vrm-girl";
+    els.avatarSelect.value = activeAvatarName;
+    avatar.setView("half");
+    const ok = await ensureAvatarLoaded();
+    if (!ok) setStatus("标准测试：数字虚拟人加载失败");
+  } else {
+    const savedView = localStorage.getItem("dash.view");
+    if (savedView && MODE_VIEWS[mode].includes(savedView)) {
+      avatar.setView(savedView);
+      document.querySelectorAll(".view-btn").forEach((b) =>
+        b.classList.toggle("active", b.dataset.view === savedView)
+      );
+    }
   }
 }
 

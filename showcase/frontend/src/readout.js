@@ -4,7 +4,7 @@
 // 分组：A 版本只有「面部」组；B 版本加「骨骼框架」「手部骨骼」组。
 const WINDOW_MS = 10_000;
 
-// 面部组：覆盖皮套人实际驱动的 VRM expression 来源
+// 面部组：覆盖数字虚拟人实际驱动的 VRM expression 来源
 export const FACE_TRACKS = [
   "eyeBlinkLeft",
   "eyeBlinkRight",
