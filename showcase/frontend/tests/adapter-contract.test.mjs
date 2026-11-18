@@ -42,8 +42,10 @@ test("hasOutput accepts each supported output", () => {
   assert.equal(hasOutput({ headEuler: { x: 0, y: 0, z: 0 } }), true);
 });
 
-test("neutralHeadEuler returns a stable neutral value", () => {
+test("neutralHeadEuler returns a valid neutral value", () => {
   assert.deepEqual(neutralHeadEuler(null), { x: 0, y: 0, z: 0 });
+  assert.deepEqual(neutralHeadEuler({}), { x: 0, y: 0, z: 0 });
+  assert.deepEqual(neutralHeadEuler({ x: NaN, y: 1, z: 2 }), { x: 0, y: 0, z: 0 });
   assert.deepEqual(neutralHeadEuler({ x: 1, y: 2, z: 3 }), { x: 1, y: 2, z: 3 });
 });
 
@@ -73,15 +75,30 @@ test("inferFrame supports adapters that only implement infer", () => {
   assert.deepEqual(calls, [["infer", "frame", 123]]);
 });
 
-test("inferFrame prefers inferVideo and supports legacy conversion", () => {
+test("inferFrame prefers inferVideo", () => {
   const video = { inferVideo: (source, ts) => ({ ts, source }) };
   assert.deepEqual(inferFrame(video, "frame", 7), { ts: 7, source: "frame" });
-  const legacy = { detectForVideo: (source, ts) => ({ source, ts }) };
-  assert.deepEqual(inferFrame(legacy, "frame", 8, (value) => ({ ...value, converted: true })), {
-    source: "frame",
-    ts: 8,
-    converted: true,
-  });
+});
+
+test("inferFrame awaits async infer without treating a Promise as a frame", async () => {
+  const adapter = {
+    async infer(source, ts) {
+      await Promise.resolve();
+      return { timestampMs: ts, blendshapes: { jawOpen: 0.4 } };
+    },
+  };
+  const pending = inferFrame(adapter, "frame", 42);
+  assert.equal(typeof pending.then, "function");
+  const frame = await pending;
+  assert.equal(frame.timestampMs, 42);
+  assert.deepEqual(frame.blendshapes, { jawOpen: 0.4 });
+});
+
+test("inferFrame rejects adapters without infer/inferVideo", () => {
+  assert.throws(
+    () => inferFrame({ detectForVideo() {} }, "frame", 1),
+    /inferVideo\/infer/,
+  );
 });
 
 test("registry accepts the legacy perception kind and validates adapter methods", () => {

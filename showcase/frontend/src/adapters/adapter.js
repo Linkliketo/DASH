@@ -7,7 +7,11 @@ export function normalizeBlendshapes(value) {
 }
 
 export function neutralHeadEuler(value) {
-  return value || { x: 0, y: 0, z: 0 };
+  const x = Number(value?.x);
+  const y = Number(value?.y);
+  const z = Number(value?.z);
+  if (![x, y, z].every(Number.isFinite)) return { x: 0, y: 0, z: 0 };
+  return { x, y, z };
 }
 
 export function blendshapeScores(value) {

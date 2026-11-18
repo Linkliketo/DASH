@@ -60,6 +60,8 @@ let videoAbort = null;
 let videoRunId = 0;
 let photoRunId = 0;
 let processing = false;
+let cameraBusy = false;
+let modelSwitching = false;
 
 // 皮套人：manifest 条目 + 懒加载（首次需要时才下载/解析）
 const FALLBACK_AVATAR = {
@@ -397,8 +399,9 @@ async function startCamera() {
 
 async function cameraLoop() {
   const video = els.sourceVideo;
-  while (camRunning && state === "camera" && !benchActive) {
-    if (video.readyState >= 2 && activeAdapter) {
+  while (camRunning && state === "camera" && !benchActive && !modelSwitching) {
+    if (video.readyState >= 2 && activeAdapter && !cameraBusy) {
+      cameraBusy = true;
       try {
         const frame = await activeAdapter.infer(video, performance.now());
         frameCount++;
@@ -409,6 +412,8 @@ async function cameraLoop() {
         }
       } catch {
         // 时间戳回退等瞬时错误跳过这一帧
+      } finally {
+        cameraBusy = false;
       }
     }
     await new Promise((r) => requestAnimationFrame(r));
@@ -425,8 +430,8 @@ async function startPhoto(file) {
   const runId = ++photoRunId;
   enterStage("photo");
   setStatus("分析照片中…（本地推理）");
-  input.setPhoto(file);
   try {
+    input.setPhoto(file);
     const bitmap = await createImageBitmap(file);
     const frame = await activeAdapter.infer(bitmap, 0);
     if (runId !== photoRunId) return; // 连续换图时丢弃旧结果
@@ -572,10 +577,9 @@ async function onModelChange() {
     return;
   }
   const resumeCamera = camRunning && state === "camera" && !benchActive;
-  if (resumeCamera) {
-    camRunning = false;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
+  if (resumeCamera) camRunning = false;
+  modelSwitching = true;
+  while (cameraBusy) await new Promise((resolve) => setTimeout(resolve, 0));
   setBusy(true);
   setStatus(`正在切换模型：${name}…`);
   let next = null;
@@ -611,6 +615,7 @@ async function onModelChange() {
     els.modelSelect.value = activeModelName;
   } finally {
     setBusy(false);
+    modelSwitching = false;
     if (resumeCamera && state === "camera" && !benchActive) {
       camRunning = true;
       cameraLoop();
