@@ -61,6 +61,7 @@ let videoRunId = 0;
 let photoRunId = 0;
 let processing = false;
 let cameraBusy = false;
+let cameraLoopActive = false;
 let modelSwitching = false;
 
 // 皮套人：manifest 条目 + 懒加载（首次需要时才下载/解析）
@@ -398,25 +399,31 @@ async function startCamera() {
 }
 
 async function cameraLoop() {
+  if (cameraLoopActive) return;
+  cameraLoopActive = true;
   const video = els.sourceVideo;
-  while (camRunning && state === "camera" && !benchActive && !modelSwitching) {
-    if (video.readyState >= 2 && activeAdapter && !cameraBusy) {
-      cameraBusy = true;
-      try {
-        const frame = await activeAdapter.infer(video, performance.now());
-        frameCount++;
-        if (frame && hasOutput(frame)) applyFrame(frame, { mirror: true });
-        else {
-          mesh.clear();
-          readout.update([], {}); // 零值推进，轨道不冻结
+  try {
+    while (camRunning && state === "camera" && !benchActive && !modelSwitching) {
+      if (video.readyState >= 2 && activeAdapter && !cameraBusy) {
+        cameraBusy = true;
+        try {
+          const frame = await activeAdapter.infer(video, performance.now());
+          frameCount++;
+          if (frame && hasOutput(frame)) applyFrame(frame, { mirror: true });
+          else {
+            mesh.clear();
+            readout.update([], {}); // 零值推进，轨道不冻结
+          }
+        } catch {
+          // 时间戳回退等瞬时错误跳过这一帧
+        } finally {
+          cameraBusy = false;
         }
-      } catch {
-        // 时间戳回退等瞬时错误跳过这一帧
-      } finally {
-        cameraBusy = false;
       }
+      await new Promise((r) => requestAnimationFrame(r));
     }
-    await new Promise((r) => requestAnimationFrame(r));
+  } finally {
+    cameraLoopActive = false;
   }
 }
 
@@ -563,6 +570,10 @@ function onVideoTime() {
 
 /* ---------------- 感知模型下拉（客户端切换；蒸馏 ONNX 二期加入） ---------------- */
 async function onModelChange() {
+  if (modelSwitching) {
+    els.modelSelect.value = activeModelName;
+    return;
+  }
   const name = els.modelSelect.value;
   if (name === activeModelName) return;
   if (processing) {
@@ -579,7 +590,20 @@ async function onModelChange() {
   const resumeCamera = camRunning && state === "camera" && !benchActive;
   if (resumeCamera) camRunning = false;
   modelSwitching = true;
-  while (cameraBusy) await new Promise((resolve) => setTimeout(resolve, 0));
+  const waitStart = performance.now();
+  while (cameraBusy) {
+    if (performance.now() - waitStart > 3000) {
+      modelSwitching = false;
+      els.modelSelect.value = activeModelName;
+      setStatus("摄像头推理未结束，已取消模型切换");
+      if (resumeCamera && state === "camera" && !benchActive) {
+        camRunning = true;
+        cameraLoop();
+      }
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   setBusy(true);
   setStatus(`正在切换模型：${name}…`);
   let next = null;
@@ -610,7 +634,7 @@ async function onModelChange() {
         setStatus(`模型切换失败：${e.message || e}`);
       }
     } else {
-      setStatus(String(e.message || e));
+      setStatus(`模型切换失败，继续使用 ${activeModelName}：${e.message || e}`);
     }
     els.modelSelect.value = activeModelName;
   } finally {

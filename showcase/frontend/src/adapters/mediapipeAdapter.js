@@ -14,6 +14,14 @@ function isVideoInput(input) {
   return typeof HTMLVideoElement !== "undefined" && input instanceof HTMLVideoElement;
 }
 
+function sourceAspect(input) {
+  const width = input?.videoWidth ?? input?.width ?? input?.naturalWidth;
+  const height = input?.videoHeight ?? input?.height ?? input?.naturalHeight;
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? width / height
+    : null;
+}
+
 export function createMediaPipeAdapter(entry) {
   return new MediaPipeAdapter(entry);
 }
@@ -64,21 +72,21 @@ class MediaPipeAdapter {
     }
   }
 
-  infer(input, timestampMs) {
+  async infer(input, timestampMs) {
     if (!this.videoLm || !this.imageLm) {
       throw new Error("MediaPipe adapter is not initialized");
     }
     const result = isVideoInput(input)
       ? this.videoLm.detectForVideo(input, timestampMs)
       : this.imageLm.detect(input);
-    return toFrame(result);
+    return toFrame(result, sourceAspect(input));
   }
 
-  inferVideo(input, timestampMs) {
+  async inferVideo(input, timestampMs) {
     if (!this.videoLm) {
       throw new Error("MediaPipe adapter is not initialized");
     }
-    return toFrame(this.videoLm.detectForVideo(input, timestampMs));
+    return toFrame(this.videoLm.detectForVideo(input, timestampMs), sourceAspect(input));
   }
 
   close() {

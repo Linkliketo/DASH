@@ -25,6 +25,9 @@ export async function processVideo(video, adapter, options = {}) {
   const frames = [];
   const durationMs = video.duration * 1000;
   if (!Number.isFinite(durationMs) || durationMs <= 0) return frames;
+  const videoAspect = Number.isFinite(video.videoWidth) && Number.isFinite(video.videoHeight) && video.videoWidth > 0 && video.videoHeight > 0
+    ? video.videoWidth / video.videoHeight
+    : null;
   const total = Math.ceil(durationMs / strideMs);
   video.pause();
 
@@ -87,6 +90,7 @@ export async function processVideo(video, adapter, options = {}) {
       item.blendshapes = frame.blendshapes;
       item.landmarks = frame.landmarks;
       item.headEuler = frame.headEuler;
+      item.aspect = Number.isFinite(frame.aspect) && frame.aspect > 0 ? frame.aspect : videoAspect;
     }
 
     frames.push(item);

@@ -6,6 +6,8 @@ import { blendshapeScores } from "../src/adapters/adapter.js";
 class FakeVideo {
   constructor({ duration = 0.2, emitSeek = true } = {}) {
     this.duration = duration;
+    this.videoWidth = 640;
+    this.videoHeight = 480;
     this._currentTime = 0;
     this._emitSeek = emitSeek;
     this._listeners = new Map();
@@ -182,4 +184,22 @@ test("processVideo preserves record blendshapes for the score path", async () =>
   const frames = await processVideo(new FakeVideo(), objectAdapter, { strideMs: 66 });
   assert.deepEqual(frames[0].blendshapes, { jawOpen: 0.4, smile: 0.2 });
   assert.deepEqual(blendshapeScores(frames[0].blendshapes), { jawOpen: 0.4, smile: 0.2 });
+});
+
+test("processVideo preserves adapter aspect and falls back to video dimensions", async () => {
+  const withAspect = {
+    async infer() {
+      return { aspect: 1.25, blendshapes: [] };
+    },
+  };
+  const framed = await processVideo(new FakeVideo(), withAspect, { strideMs: 66 });
+  assert.equal(framed[0].aspect, 1.25);
+
+  const noAspect = {
+    async infer() {
+      return { blendshapes: [] };
+    },
+  };
+  const fallback = await processVideo(new FakeVideo(), noAspect, { strideMs: 66 });
+  assert.equal(fallback[0].aspect, 640 / 480);
 });

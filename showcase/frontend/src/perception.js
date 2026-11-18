@@ -38,12 +38,14 @@ function eulerFromMatrix(data) {
 }
 
 // Tasks JS 结果 → 前端通用帧格式；无人脸返回 null
-export function toFrame(result) {
+// aspect 用于 GNM 等依赖图像宽高比的 backend；MediaPipe adapter 会从输入媒体计算。
+export function toFrame(result, aspect = null) {
   const face = result?.faceLandmarks?.[0];
   if (!face) return null;
   return {
     blendshapes: result.faceBlendshapes?.[0]?.categories ?? null,
     landmarks: face,
     headEuler: eulerFromMatrix(result.facialTransformationMatrixes?.[0]?.data),
+    aspect: Number.isFinite(aspect) && aspect > 0 ? aspect : null,
   };
 }

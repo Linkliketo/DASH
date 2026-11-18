@@ -49,18 +49,21 @@ export function createAdapter(entry, options = {}) {
 }
 ```
 
-`infer()` 返回：
+`infer()` 可以是 async，返回：
 
 ```js
 {
   timestampMs,
   landmarks: [{ x, y, z }],          // 可选
   blendshapes: [{ categoryName, score }], // 可选
-  headEuler: { x, y, z }             // 可选
+  headEuler: { x, y, z },            // 可选
+  aspect: 1.777                      // 可选；图像宽高比，供 GNM 等 backend 使用
 }
 ```
 
-无检测结果返回 `null`。
+无检测结果返回 `null`。`inferVideo()` 是可选快路径；没有它时统一走 `infer()`。
+
+Benchmark 通过 `fetchBenchmarkFrame()` 等待 adapter 的 async `infer()`/`inferVideo()`；`adapters/infer.js` 不再接受 `detectForVideo()` 作为 adapter 契约。`detectForVideo()` 只属于 MediaPipe 内部实现。
 
 ## 约束
 
@@ -72,4 +75,6 @@ export function createAdapter(entry, options = {}) {
 - 新模型 `init()` 失败时，`main.js` 会尝试回退到 MediaPipe；切换失败时也会回退到 MediaPipe。
 - 可选字段缺失时，UI 会降级：无 landmarks 隐藏网格，无 blendshapes 显示“该模型无表情输出”，无 headEuler 时头部回中性。
 - 返回 `null`、`{}`、空数组时按无输出处理。
+- 图片/视频输入应尽量返回 `aspect`；缺失时 video pipeline 会用视频宽高兜底。
+- 测试命令：`cd showcase/frontend && node --test tests/*.test.mjs`。
 - 模型权重不要提交到仓库；用本地 `models/` 或独立分发。
