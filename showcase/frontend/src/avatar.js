@@ -1,11 +1,11 @@
-// VRM 皮套人渲染（场景设置与映射表照搬自已验证的 viewer/index.html）
+// VRM 数字虚拟人渲染（场景设置与映射表照搬自已验证的 viewer/index.html）
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils, VRMExpression, VRMExpressionMorphTargetBind } from "@pixiv/three-vrm";
-import { Rig } from "./rig.js?v=13";
-import { mapHeadEuler } from "./mirror.js?v=13";
-import { buildProfile, FaceMapper } from "./vrm_face/facemap.mjs?v=13";
-import { buildCustomProfile, CustomFaceMapper, groupBindsByMesh } from "./vrm_face/morphscan.mjs?v=13";
+import { Rig } from "./rig.js?v=26";
+import { mapHeadEuler } from "./mirror.js?v=26";
+import { buildProfile, FaceMapper } from "./vrm_face/facemap.mjs?v=26";
+import { buildCustomProfile, CustomFaceMapper, groupBindsByMesh } from "./vrm_face/morphscan.mjs?v=26";
 
 export class Avatar {
   constructor(canvas) {
@@ -28,13 +28,15 @@ export class Avatar {
     this.faceMode = "preset";
     this.lastMapping = null;
     // 性能埋点：渲染循环的真实耗时（benchmark 读取）
-    this.lastTiming = { rigMs: 0, renderMs: 0, totalMs: 0 };
+    this.lastTiming = { rigMs: 0, renderMs: 0, mappingMs: 0, totalMs: 0 };
+    this.lastMappingMs = 0;
     this.renderedFrames = 0;
+    this.renderingEnabled = true;
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setClearColor(0xe0f2fe, 1); // --paper-blue，让皮套人站在「蓝图」上
+    renderer.setClearColor(0xe0f2fe, 1); // --paper-blue，让数字虚拟人站在「蓝图」上
     this.renderer = renderer;
 
     const scene = new THREE.Scene();
@@ -61,6 +63,7 @@ export class Avatar {
 
     const tick = (t) => {
       requestAnimationFrame(tick);
+      if (!this.renderingEnabled) return;
       const t0 = performance.now();
       if (this.vrm) {
         // 头部跟随：指数平滑后应用欧拉角
@@ -86,10 +89,19 @@ export class Avatar {
       this.camera.lookAt(o.target);
       renderer.render(scene, this.camera);
       const t2 = performance.now();
-      this.lastTiming = { rigMs: t1 - t0, renderMs: t2 - t1, totalMs: t2 - t0 };
+      this.lastTiming = {
+        rigMs: t1 - t0,
+        renderMs: t2 - t1,
+        mappingMs: this.lastMappingMs,
+        totalMs: t2 - t0,
+      };
       this.renderedFrames++;
     };
     requestAnimationFrame(tick);
+  }
+
+  setRenderingEnabled(enabled) {
+    this.renderingEnabled = !!enabled;
   }
 
   _resize() {
@@ -303,6 +315,7 @@ export class Avatar {
       : (snap ? this.snapMapper : this.faceMapper);
     if (!mapper) return;
 
+    const mappingStart = performance.now();
     const now = performance.now();
     const dt = this._lastBlendAt
       ? Math.min(0.25, Math.max(1 / 240, (now - this._lastBlendAt) / 1000))
@@ -327,6 +340,7 @@ export class Avatar {
       this.vrm.lookAt.pitch = out.lookAt.pitch;
     }
     this.lastMapping = out.meta;
+    this.lastMappingMs = performance.now() - mappingStart;
   }
 
   // 切换 preset / custom。先清零所有 expression，避免两套映射叠加。
@@ -392,6 +406,7 @@ export class Avatar {
     this._lastSnap = false;
     this._lastBlendAt = 0;
     this.lastMapping = null;
+    this.lastMappingMs = 0;
   }
 }
 
